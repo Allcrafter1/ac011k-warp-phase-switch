@@ -33,6 +33,7 @@ class Component(Enum):
     SWITCH = "switch"
     BUTTON = "button"
     NUMBER = "number"
+    SELECT = "select"
 
     def get_discovery_type(self) -> DiscoveryType:
         return {
@@ -40,6 +41,7 @@ class Component(Enum):
             Component.SENSOR: DiscoveryType.STATE_ONLY,
             Component.SWITCH: DiscoveryType.STATE_AND_UPDATE,
             Component.NUMBER: DiscoveryType.STATE_AND_UPDATE,
+            Component.SELECT: DiscoveryType.STATE_AND_UPDATE,
             Component.BUTTON: DiscoveryType.COMMAND_ONLY
         }[self]
 
@@ -65,12 +67,15 @@ class Entity:
     def get_static_info_generic_str(self):
         if not self.include_generic:
             return "NULL"
-        # static info is not a json object, but only more key value pairs, so remove the {}.
-        # also this is a string literal, so escape inner ".
-        return "\"" + json.dumps(self.static_info_generic).strip().lstrip("{").rstrip("}").replace('"', '\\"') + "\""
+        # Static info is not a JSON object, but only more key/value pairs, so
+        # remove the braces. Encoding the complete fragment once more as JSON
+        # yields a valid C++ string literal, including nested JSON templates.
+        fragment = json.dumps(self.static_info_generic).strip().lstrip("{").rstrip("}")
+        return json.dumps(fragment)
 
     def get_static_info_homeassistant_str(self):
-        return "\"" + json.dumps(self.static_info_generic | self.static_info_homeassistant).strip().lstrip("{").rstrip("}").replace('"', '\\"') + "\""
+        fragment = json.dumps(self.static_info_generic | self.static_info_homeassistant).strip().lstrip("{").rstrip("}")
+        return json.dumps(fragment)
 
 topic_template = """    {{
         .feature = "{feature}",
@@ -181,6 +186,25 @@ Entity(False, Component.BINARY_SENSOR, Feature.EVSE, "online", "evse/low_level_s
     {"value_template":"{{value_json.uptime>0}}",
      "payload_on":"True",
      "payload_off":"False"}),
+
+Entity(False, Component.SELECT, Feature.EVSE, "phase_mode", "evse/phase_switch", "Ladephasen", "Charging phases",
+    {},
+    {"value_template":"{{ value_json.requested_phases | string }}",
+     "command_template":"{\"phases\": {{ value | int }}}",
+     "options":["1", "3"],
+     "icon":"mdi:sine-wave"}),
+
+Entity(True, Component.SENSOR, Feature.EVSE, "active_phases", "evse/phase_switch", "Aktive Ladephasen", "Active charging phases",
+    {"value_template":"{{value_json.active_phases}}",
+     "icon":"mdi:transmission-tower"},
+    {}),
+
+Entity(False, Component.BINARY_SENSOR, Feature.EVSE, "phase_switching", "evse/phase_switch", "Phasenumschaltung aktiv", "Phase switch active",
+    {},
+    {"value_template":"{{value_json.switching}}",
+     "payload_on":"True",
+     "payload_off":"False",
+     "icon":"mdi:swap-horizontal"}),
 ]
 
 topics = [topic_template.format(

@@ -160,7 +160,52 @@ public:
 
     void sendChargingLimit1(uint8_t currentLimit, byte sendSequenceNumber);
     void sendChargingLimit2(uint8_t currentLimit, byte sendSequenceNumber);
-    void sendChargingLimit3(uint8_t currentLimit, byte sendSequenceNumber);
+    void sendChargingLimit3(uint8_t currentLimit, byte sendSequenceNumber, uint8_t number_phases = 0);
+
+    /*
+     * GD 1.7.186 phase switching
+     *
+     * The GD controls the contactors. The ESP only sends a charging profile
+     * containing numberPhases after charging has stopped and confirms the
+     * result with cmdAA CtrlGetLoadPhase (AA 10 50).
+     */
+    ConfigRoot phase_switch_state;
+    ConfigRoot phase_switch_update;
+    ConfigRoot phase_switch_config;
+
+    enum PhaseSwitchStage : uint8_t {
+        PHASE_SWITCH_IDLE = 0,
+        PHASE_SWITCH_STOPPING = 1,
+        PHASE_SWITCH_OFF_DELAY = 2,
+        PHASE_SWITCH_APPLYING = 3,
+        PHASE_SWITCH_CONFIRMING = 4,
+        PHASE_SWITCH_RESTARTING = 5,
+        PHASE_SWITCH_RESTART_PAUSE = 6,
+        PHASE_SWITCH_ERROR = 7,
+    };
+
+    bool phase_switch_supported();
+    void request_phase_switch(uint8_t phases);
+    void process_phase_switch();
+    void send_get_load_phase();
+    void set_phase_switch_stage(PhaseSwitchStage stage);
+    void set_phase_switch_error(uint8_t code, const char *text);
+    void finish_phase_switch();
+
+    PhaseSwitchStage phase_switch_stage = PHASE_SWITCH_IDLE;
+    uint8_t phase_switch_target = 3;
+    uint8_t phase_query_attempts = 0;
+    uint8_t restart_attempts = 0;
+    uint16_t last_phase_current_deciamp[3] = {0, 0, 0};
+    uint32_t phase_switch_stage_since = 0;
+    uint32_t last_phase_query = 0;
+    uint32_t last_phase_current_update = 0;
+    uint32_t last_successful_phase_switch = 0;
+    bool resume_after_phase_switch = false;
+
+    /* Retry the initial boot-mode request of the GD updater. */
+    uint32_t last_gd_boot_request = 0;
+    uint8_t gd_boot_request_attempts = 0;
 
     // ConfigRoot evse_config;
     ConfigRoot* evse_state;

@@ -293,6 +293,8 @@ byte SetSmartparam[]            = {0xAA, 0x18, 0x25, 0x0E, 0x00, 0x05, 0x00, 0x0
 byte SetReset[]                 = {0xAA, 0x18, 0x12, 0x01, 0x00, 3}; // 112 cmdAACtrlSetReset, 3 // this triggers 0x02 SN, Hardware, Version
 byte cantestsetAck[]            = {0xAA, 0x18, 0x2A, 0x00, 0x00}; // cmdAACtrlcantestsetAck test cancom...111
 byte GetRtc[]                   = {0xAA, 0x10, 0x02, 0x00, 0x00};
+// GD 1.7.186: cmdAACtrlGetLoadPhaseAck (target firmware command ID 0x150)
+byte GetLoadPhase[]             = {0xAA, 0x10, 0x50, 0x00, 0x00};
 byte TimeAck[]                  = {'c', 'a', 'y', 'm', 'd', 'h', 'm', 's', 0, 0, 0, 0};
 
 //D (2023-04-06 09:19:22) [EN_WSS, 708]: recv[0:83] [2,"11312954-a1d1-4023-923e-bf996401b021","ClearChargingProfile",{"connectorId":0}]
@@ -675,11 +677,233 @@ void AC011K::sendChargingLimit2(uint8_t currentLimit, byte sendSequenceNumber) {
     sendCommand(ChargingLimit2, sizeof(ChargingLimit2), sendSequenceNumber, false);
 }
 
-void AC011K::sendChargingLimit3(uint8_t currentLimit, byte sendSequenceNumber) {  //  AD 01 91
+void AC011K::sendChargingLimit3(uint8_t currentLimit, byte sendSequenceNumber, uint8_t number_phases) {  // AD 01 91
     fillTimeGdCommand(&ChargingLimit3[56]);
     ChargingLimit3[56] = ChargingLimit3[56] +100;  // adds 100 to the year, because it starts at the year 1900
     ChargingLimit3[70] = currentLimit;
+    if (number_phases == 0) {
+        number_phases = phase_switch_supported()
+            ? phase_switch_state.get("requested_phases")->asUint()
+            : 3;
+    }
+    ChargingLimit3[74] = (number_phases == 1) ? 1 : 3;
     sendCommand(ChargingLimit3, sizeof(ChargingLimit3), sendSequenceNumber, false);
+}
+
+bool AC011K::phase_switch_supported() {
+    const String &hardware = evse.evse_hardware_configuration.get("Hardware")->asString();
+    const String &firmware = evse.evse_hardware_configuration.get("FirmwareVersion")->asString();
+    return (hardware == "AC011K-AE-25" || hardware == "AC011K-AE-25-STL")
+        && firmware == "1.7.186";
+}
+
+void AC011K::set_phase_switch_stage(PhaseSwitchStage stage) {
+    phase_switch_stage = stage;
+    phase_switch_stage_since = millis();
+    phase_switch_state.get("stage")->updateUint(stage);
+    phase_switch_state.get("switching")->updateBool(
+        stage != PHASE_SWITCH_IDLE && stage != PHASE_SWITCH_ERROR);
+}
+
+void AC011K::set_phase_switch_error(uint8_t code, const char *text) {
+    phase_switch_state.get("last_error")->updateUint(code);
+    phase_switch_state.get("last_error_text")->updateString(text);
+    logger.printfln("Phase switch error %u: %s", code, text);
+    set_phase_switch_stage(PHASE_SWITCH_ERROR);
+}
+
+void AC011K::send_get_load_phase() {
+    if (!phase_switch_supported())
+        return;
+    sendCommand(GetLoadPhase, sizeof(GetLoadPhase), sendSequenceNumber++, false);
+    last_phase_query = millis();
+}
+
+void AC011K::request_phase_switch(uint8_t phases) {
+    if (phases != 1 && phases != 3) {
+        set_phase_switch_error(2, "Only one or three phases are valid");
+        return;
+    }
+    if (!phase_switch_supported()) {
+        set_phase_switch_error(1, "Phase switching requires AC011K-AE-25 GD firmware 1.7.186");
+        return;
+    }
+    if (phase_switch_state.get("switching")->asBool()) {
+        phase_switch_state.get("last_error")->updateUint(3);
+        phase_switch_state.get("last_error_text")->updateString("A phase switch is already running");
+        return;
+    }
+    if (phase_switch_stage == PHASE_SWITCH_ERROR)
+        set_phase_switch_stage(PHASE_SWITCH_IDLE);
+
+    phase_switch_config.get("default_phases")->updateUint(phases);
+    api.writeConfig("evse/phase_switch_config", &phase_switch_config);
+    phase_switch_state.get("requested_phases")->updateUint(phases);
+    phase_switch_state.get("last_error")->updateUint(0);
+    phase_switch_state.get("last_error_text")->updateString("");
+    logger.printfln("Phase switch requested: %u phase(s)", phases);
+}
+
+void AC011K::finish_phase_switch() {
+    phase_switch_state.get("last_error")->updateUint(0);
+    phase_switch_state.get("last_error_text")->updateString("");
+    phase_switch_state.get("last_switch_ms")->updateUint(millis());
+    last_successful_phase_switch = millis();
+
+    if (resume_after_phase_switch
+        && evse.evse_state.get("iec61851_state")->asUint() != IEC_STATE_A
+        && evse.evse_state.get("allowed_charging_current")->asUint() >= 6000) {
+        restart_attempts = 1;
+        bs_evse_start_charging();
+        set_phase_switch_stage(PHASE_SWITCH_RESTARTING);
+        return;
+    }
+
+    resume_after_phase_switch = false;
+    set_phase_switch_stage(PHASE_SWITCH_IDLE);
+}
+
+void AC011K::process_phase_switch() {
+    if (!initialized || firmware_update_running)
+        return;
+
+    const bool supported = phase_switch_supported();
+    phase_switch_state.get("supported")->updateBool(supported);
+    if (!supported)
+        return;
+
+    // Ask the GD regularly so MQTT/Home Assistant reports the real contactor mode.
+    if (phase_switch_stage == PHASE_SWITCH_IDLE
+        && deadline_elapsed(last_phase_query + 60000)) {
+        send_get_load_phase();
+    }
+
+    if (phase_switch_stage == PHASE_SWITCH_ERROR) {
+        // A fresh valid request can recover without rebooting.
+        if (phase_switch_state.get("requested_phases")->asUint()
+            == phase_switch_state.get("active_phases")->asUint()) {
+            set_phase_switch_stage(PHASE_SWITCH_IDLE);
+        }
+        return;
+    }
+
+    if (phase_switch_stage == PHASE_SWITCH_IDLE) {
+        const uint8_t requested = phase_switch_state.get("requested_phases")->asUint();
+        const uint8_t active = phase_switch_state.get("active_phases")->asUint();
+        if ((requested != 1 && requested != 3) || active == 0 || requested == active)
+            return;
+
+        const uint32_t minimum_interval_ms =
+            phase_switch_config.get("minimum_switch_interval")->asUint() * 1000UL;
+        if (last_successful_phase_switch != 0
+            && !deadline_elapsed(last_successful_phase_switch + minimum_interval_ms)) {
+            return;
+        }
+
+        phase_switch_target = requested;
+        resume_after_phase_switch =
+            evse.evse_state.get("iec61851_state")->asUint() != IEC_STATE_A
+            && evse.evse_state.get("allowed_charging_current")->asUint() >= 6000;
+        phase_query_attempts = 0;
+        logger.printfln("Starting safe phase switch from %u to %u phase(s); resume=%s",
+            active, phase_switch_target, resume_after_phase_switch ? "true" : "false");
+        bs_evse_stop_charging();
+        set_phase_switch_stage(PHASE_SWITCH_STOPPING);
+        return;
+    }
+
+    if (phase_switch_stage == PHASE_SWITCH_STOPPING) {
+        const bool stopped =
+            evse.evse_state.get("iec61851_state")->asUint() != IEC_STATE_C
+            && evse.evse_state.get("charger_state")->asUint() != CHARGER_STATE_CHARGING;
+        if (stopped) {
+            set_phase_switch_stage(PHASE_SWITCH_OFF_DELAY);
+            return;
+        }
+        if (deadline_elapsed(phase_switch_stage_since + 30000)) {
+            set_phase_switch_error(4, "Charging did not stop within 30 seconds");
+        }
+        return;
+    }
+
+    if (phase_switch_stage == PHASE_SWITCH_OFF_DELAY) {
+        if (evse.evse_state.get("iec61851_state")->asUint() == IEC_STATE_C) {
+            bs_evse_stop_charging();
+            set_phase_switch_stage(PHASE_SWITCH_STOPPING);
+            return;
+        }
+
+        const bool fresh_current = !deadline_elapsed(last_phase_current_update + 15000);
+        const bool current_is_zero = last_phase_current_deciamp[0] <= 5
+                                  && last_phase_current_deciamp[1] <= 5
+                                  && last_phase_current_deciamp[2] <= 5;
+        if (fresh_current && !current_is_zero)
+            return;
+
+        const uint32_t off_delay_ms =
+            phase_switch_config.get("minimum_off_time")->asUint() * 1000UL;
+        if (!deadline_elapsed(phase_switch_stage_since + off_delay_ms))
+            return;
+
+        uint8_t current = evse.evse_state.get("allowed_charging_current")->asUint() / 1000;
+        if (current < 6)
+            current = 6;
+        logger.printfln("Contactors are load-free; applying %u-phase charging profile", phase_switch_target);
+        sendChargingLimit3(current, sendSequenceNumber++, phase_switch_target);
+        set_phase_switch_stage(PHASE_SWITCH_APPLYING);
+        return;
+    }
+
+    if (phase_switch_stage == PHASE_SWITCH_APPLYING) {
+        if (!deadline_elapsed(phase_switch_stage_since + 750))
+            return;
+        phase_query_attempts = 1;
+        send_get_load_phase();
+        set_phase_switch_stage(PHASE_SWITCH_CONFIRMING);
+        return;
+    }
+
+    if (phase_switch_stage == PHASE_SWITCH_CONFIRMING) {
+        if (phase_switch_state.get("active_phases")->asUint() == phase_switch_target) {
+            logger.printfln("GD confirmed %u-phase mode", phase_switch_target);
+            finish_phase_switch();
+            return;
+        }
+        if (deadline_elapsed(last_phase_query + 1500)) {
+            if (phase_query_attempts >= 6) {
+                set_phase_switch_error(5, "GD did not confirm the requested phase mode");
+                return;
+            }
+            ++phase_query_attempts;
+            send_get_load_phase();
+        }
+        return;
+    }
+
+    if (phase_switch_stage == PHASE_SWITCH_RESTARTING) {
+        if (evse.evse_state.get("charger_state")->asUint() == CHARGER_STATE_CHARGING) {
+            logger.printfln("Charging resumed after phase switch");
+            resume_after_phase_switch = false;
+            set_phase_switch_stage(PHASE_SWITCH_IDLE);
+            return;
+        }
+        if (deadline_elapsed(phase_switch_stage_since + 5000)) {
+            if (restart_attempts >= 3) {
+                set_phase_switch_error(6, "Phase switched, but charging did not resume");
+                return;
+            }
+            bs_evse_stop_charging();
+            set_phase_switch_stage(PHASE_SWITCH_RESTART_PAUSE);
+        }
+        return;
+    }
+
+    if (phase_switch_stage == PHASE_SWITCH_RESTART_PAUSE
+        && deadline_elapsed(phase_switch_stage_since + 1500)) {
+        ++restart_attempts;
+        bs_evse_start_charging();
+        set_phase_switch_stage(PHASE_SWITCH_RESTARTING);
+    }
 }
 
 
@@ -696,6 +920,7 @@ int AC011K::bs_evse_start_charging() {
             logger.printfln("Unknown firmware version. Trying commands for latest version.");
             __attribute__ ((fallthrough));
         case 258:
+        case 186: // 1.7.186
         case 460:
         case 538:
         case 653:
@@ -756,6 +981,7 @@ int AC011K::bs_evse_set_max_charging_current(uint16_t max_current) {
             logger.printfln("Unknown firmware version. Trying commands for latest version.");
             __attribute__ ((fallthrough));
         case 258:
+        case 186: // 1.7.186
         case 460:
         case 538:
         case 653:
@@ -946,6 +1172,7 @@ void AC011K::flashChunk(uint8_t *data, uint32_t chunk_index, size_t chunk_length
 void AC011K::update_all_data() {
     evse.update_all_data();
     evse_slot_machine();
+    process_phase_switch();
 }
 
 void AC011K::set_user_current(uint16_t current) {
@@ -960,6 +1187,35 @@ void AC011K::pre_setup() {
     evse_state = &evse.evse_state;
     evse_low_level_state = &evse.evse_low_level_state;
     evse_slots = &evse.evse_slots;
+
+    phase_switch_state = Config::Object({
+        {"supported", Config::Bool(false)},
+        {"requested_phases", Config::Uint8(3)},
+        {"active_phases", Config::Uint8(0)},
+        {"switching", Config::Bool(false)},
+        {"stage", Config::Uint8(PHASE_SWITCH_IDLE)},
+        {"last_error", Config::Uint8(0)},
+        {"last_error_text", Config::Str("", 0, 96)},
+        {"last_switch_ms", Config::Uint32(0)},
+    });
+    phase_switch_update = Config::Object({
+        {"phases", Config::Uint8(3)},
+    });
+    phase_switch_config = ConfigRoot(Config::Object({
+        {"default_phases", Config::Uint8(3)},
+        {"minimum_switch_interval", Config::Uint32(300)},
+        {"minimum_off_time", Config::Uint32(5)},
+    }), [](Config &cfg) -> String {
+        const uint8_t phases = cfg.get("default_phases")->asUint();
+        if (phases != 1 && phases != 3)
+            return "default_phases must be 1 or 3";
+        if (cfg.get("minimum_switch_interval")->asUint() > 86400)
+            return "minimum_switch_interval must not exceed 86400 seconds";
+        const uint32_t off_time = cfg.get("minimum_off_time")->asUint();
+        if (off_time < 2 || off_time > 60)
+            return "minimum_off_time must be between 2 and 60 seconds";
+        return "";
+    });
 }
 
 void AC011K::setup() {
@@ -998,6 +1254,10 @@ void AC011K::setup() {
     }
     evse.evse_auto_start_charging.get("auto_start_charging")->updateBool(
         !evse.evse_slots.get(CHARGING_SLOT_AUTOSTART_BUTTON)->get("clear_on_disconnect")->asBool());
+
+    api.restorePersistentConfig("evse/phase_switch_config", &phase_switch_config);
+    phase_switch_state.get("requested_phases")->updateUint(
+        phase_switch_config.get("default_phases")->asUint());
 
     Serial2.setRxBufferSize(1024);
     Serial2.begin(115200, SERIAL_8N1, 26, 27); // PrivComm to EVSE GD32 Chip
@@ -1254,6 +1514,9 @@ void AC011K::loop()
                                 evse.evse_hardware_configuration.get("FirmwareVersion")->asString().startsWith("1.2.", 0)  // known working: 1.2.653
                                 && (evse.evse_hardware_configuration.get("FirmwareVersion")->asString().substring(4).toInt() <= 653)  // higest known working version (we assume earlier versions work as well)
                             )
+                            || (
+                                evse.evse_hardware_configuration.get("FirmwareVersion")->asString().compareTo("1.7.186") == 0
+                            )
                         );
                     evse.evse_hardware_configuration.get("initialized")->updateBool(evse.initialized);
                     initialized = evse.initialized;
@@ -1265,6 +1528,9 @@ void AC011K::loop()
                         evse.evse_hardware_configuration.get("FirmwareVersion")->asEphemeralCStr());
                     if(evse.initialized) {
                         logger.printfln("EN+ GD EVSE initialized.");
+                        phase_switch_state.get("supported")->updateBool(phase_switch_supported());
+                        if (phase_switch_supported())
+                            send_get_load_phase();
                     } else {
                         logger.printfln("EN+ GD EVSE Firmware Version or Hardware is not supported.");
                     }
@@ -1414,6 +1680,10 @@ void AC011K::loop()
                     meter.updateMeterAllValues(METER_ALL_VALUES_CURRENT_L1_A, float(getPrivCommRxBufferUint16(106))/10.0);
                     meter.updateMeterAllValues(METER_ALL_VALUES_CURRENT_L2_A, float(getPrivCommRxBufferUint16(108))/10.0);
                     meter.updateMeterAllValues(METER_ALL_VALUES_CURRENT_L3_A, float(getPrivCommRxBufferUint16(110))/10.0);
+                    last_phase_current_deciamp[0] = getPrivCommRxBufferUint16(106);
+                    last_phase_current_deciamp[1] = getPrivCommRxBufferUint16(108);
+                    last_phase_current_deciamp[2] = getPrivCommRxBufferUint16(110);
+                    last_phase_current_update = millis();
 
                     // meter power
                     static float prev_energy_rel_raw = 0;
@@ -1615,6 +1885,16 @@ void AC011K::loop()
                         break;
                     case 0x3F: // 
                         logger.printfln("Rx cmd_%.2X seq:%.2X len:%d crc:%.4X - cmdAAInit7Ack", cmd, seq, len, crc);
+                        break;
+                    case 0x50: // GD 1.7.186 cmdAACtrlGetLoadPhaseAck
+                        if (len >= 5 && (PrivCommRxBuffer[12] == 1 || PrivCommRxBuffer[12] == 3)) {
+                            const uint8_t phases = PrivCommRxBuffer[12];
+                            phase_switch_state.get("active_phases")->updateUint(phases);
+                            logger.printfln("GD load phase mode: %u phase(s)", phases);
+                        } else {
+                            logger.printfln("Invalid GD load phase reply");
+                            log_hex_privcomm_line(PrivCommRxBuffer);
+                        }
                         break;
                     default:
                         logger.printfln("Rx cmd_%.2X seq:%.2X len:%d crc:%.4X -  I don't know what %.2X means.", cmd, seq, len, crc, PrivCommRxBuffer[9]);
@@ -1855,6 +2135,21 @@ void AC011K::loop()
      */
     
     //resend flash commands if needed
+    if (this->firmware_update_running && GD_boot_mode_requested
+        && deadline_elapsed(last_gd_boot_request + 3000)) {
+        if (gd_boot_request_attempts < 6) {
+            ++gd_boot_request_attempts;
+            last_gd_boot_request = millis();
+            logger.printfln("No GD boot-mode acknowledgement, retry %u/6", gd_boot_request_attempts);
+            RemoteUpdate[7] = 5;
+            sendCommand(RemoteUpdate, sizeof(RemoteUpdate), sendSequenceNumber++, false);
+        } else {
+            logger.printfln("GD boot-mode request failed after 6 attempts; aborting update safely");
+            this->firmware_update_running = false;
+            GD_boot_mode_requested = false;
+        }
+    }
+
     //if(this->firmware_update_running && flash_seq == PrivCommTxBuffer[5] && !ready_for_next_chunk && deadline_elapsed(last_flash + 3000)) {
     if(this->firmware_update_running && flash_seq == PrivCommTxBuffer[5] && deadline_elapsed(last_flash + 3000)) {
         last_flash = millis();
@@ -1918,6 +2213,12 @@ void AC011K::register_urls()
 {
     evse.register_urls();
 
+    api.addState("evse/phase_switch", &phase_switch_state, {}, 1000);
+    api.addPersistentConfig("evse/phase_switch_config", &phase_switch_config, {}, 1000);
+    api.addCommand("evse/phase_switch_update", &phase_switch_update, {}, [this](){
+        request_phase_switch(phase_switch_update.get("phases")->asUint());
+    }, false);
+
     api.addCommand("evse/reset", Config::Null() , {}, [this](){
         if (evse.evse_state.get("iec61851_state")->asUint() == IEC_STATE_A) {
                 logger.printfln("OK, I'll try to get the GD chip into app mode.");
@@ -1959,6 +2260,8 @@ void AC011K::register_urls()
             RemoteUpdate[7] = 5; // Reset into boot mode
             FlashBuffer[7] = 3; // flash write (3=write, 4=verify)
             GD_boot_mode_requested = true;
+            gd_boot_request_attempts = 1;
+            last_gd_boot_request = millis();
             sendCommand(RemoteUpdate, sizeof(RemoteUpdate), sendSequenceNumber++, false);
         }, 2000);
         return true;
@@ -2105,6 +2408,8 @@ bool AC011K::handle_gd_upload_chunk(WebServerRequest request, size_t chunk_index
                     RemoteUpdate[7] = 5; // Reset into boot mode
                     FlashBuffer[7] = 3; // flash write (3=write, 4=verify)
                     GD_boot_mode_requested = true;
+                    gd_boot_request_attempts = 1;
+                    last_gd_boot_request = millis();
                     sendCommand(RemoteUpdate, sizeof(RemoteUpdate), sendSequenceNumber++, false);
             }, 2000);
         }
@@ -2147,6 +2452,8 @@ bool AC011K::handle_gd_upload_chunk(WebServerRequest request, size_t chunk_index
                     RemoteUpdate[7] = 5; // Reset into boot mode
                     FlashBuffer[7] = 3; // flash write (3=write, 4=verify)
                     GD_boot_mode_requested = true;
+                    gd_boot_request_attempts = 1;
+                    last_gd_boot_request = millis();
                     sendCommand(RemoteUpdate, sizeof(RemoteUpdate), sendSequenceNumber++, false);
             }, 2000);
 
@@ -2161,4 +2468,3 @@ bool AC011K::handle_gd_upload_chunk(WebServerRequest request, size_t chunk_index
     }
     return true;
 }
-
