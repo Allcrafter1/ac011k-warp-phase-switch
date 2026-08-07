@@ -2285,14 +2285,17 @@ void AC011K::register_urls()
             0x01, 0xd1, 0x00, 0xf0, 0x2f, 0xf8, 0xaf, 0xf2, 0x09, 0x0e, 0xba, 0xe8,
             0x0f, 0x00, 0x13, 0xf0, 0x01, 0x0f, 0x18, 0xbf, 0xfb, 0x1a, 0x43, 0xf0
         };
-        if (len < max(sizeof(GD_intel_hex_firmware_identifier), sizeof(GD_bin_firmware_identifier))) {
-            logger.printfln("This is too small for a GD firmware.");
-            request.send(400, "text/plain", "This is not a GD firmware. Too small.");
-            convert_intel_hex_to_bin = false;
-            update_aborted = true;
-            return false;
-        }
         if (index == 0) {
+            // Only the first HTTP upload chunk contains the firmware header.
+            // Later chunks, especially the final one, may legitimately be
+            // shorter than the identifying byte sequence.
+            if (len < max(sizeof(GD_intel_hex_firmware_identifier), sizeof(GD_bin_firmware_identifier))) {
+                logger.printfln("This is too small for a GD firmware.");
+                request.send(400, "text/plain", "This is not a GD firmware. Too small.");
+                convert_intel_hex_to_bin = false;
+                update_aborted = true;
+                return false;
+            }
             logger.printfln("Checking if the upload is a GD firmware that I would recognize.");
             void* ptr = memmem(data, len, GD_intel_hex_firmware_identifier, sizeof(GD_intel_hex_firmware_identifier));
             if (ptr != NULL) {
