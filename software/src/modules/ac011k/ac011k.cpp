@@ -779,12 +779,6 @@ void AC011K::process_phase_switch() {
     if (!supported)
         return;
 
-    // Ask the GD regularly so MQTT/Home Assistant reports the real contactor mode.
-    if (phase_switch_stage == PHASE_SWITCH_IDLE
-        && deadline_elapsed(last_phase_query + 60000)) {
-        send_get_load_phase();
-    }
-
     if (phase_switch_stage == PHASE_SWITCH_ERROR) {
         // A fresh valid request can recover without rebooting.
         if (phase_switch_state.get("requested_phases")->asUint()
@@ -862,28 +856,8 @@ void AC011K::process_phase_switch() {
     }
 
     if (phase_switch_stage == PHASE_SWITCH_APPLYING) {
-        if (!deadline_elapsed(phase_switch_stage_since + 750))
-            return;
-        phase_query_attempts = 1;
-        send_get_load_phase();
-        set_phase_switch_stage(PHASE_SWITCH_CONFIRMING);
-        return;
-    }
-
-    if (phase_switch_stage == PHASE_SWITCH_CONFIRMING) {
-        if (phase_switch_state.get("active_phases")->asUint() == phase_switch_target) {
-            logger.printfln("GD confirmed %u-phase mode", phase_switch_target);
-            finish_phase_switch();
-            return;
-        }
-        if (deadline_elapsed(last_phase_query + 1500)) {
-            if (phase_query_attempts >= 6) {
-                set_phase_switch_error(5, "GD did not confirm the requested phase mode");
-                return;
-            }
-            ++phase_query_attempts;
-            send_get_load_phase();
-        }
+        if (deadline_elapsed(phase_switch_stage_since + 5000))
+            set_phase_switch_error(5, "GD did not acknowledge the requested phase profile");
         return;
     }
 
@@ -1569,8 +1543,14 @@ void AC011K::loop()
                     if(evse.initialized) {
                         logger.printfln("EN+ GD EVSE initialized.");
                         phase_switch_state.get("supported")->updateBool(phase_switch_supported());
-                        if (phase_switch_supported())
+                        if (phase_switch_supported()) {
+                            // This hardware powers up in its three-phase mode. The GD
+                            // has no GetLoadPhase command; subsequent changes are
+                            // tracked from acknowledged charging profiles.
+                            if (phase_switch_state.get("active_phases")->asUint() == 0)
+                                phase_switch_state.get("active_phases")->updateUint(3);
                             sendCommand(GetFaultCode, sizeof(GetFaultCode), sendSequenceNumber++, false);
+                        }
                     } else {
                         logger.printfln("EN+ GD EVSE Firmware Version or Hardware is not supported.");
                     }
@@ -2117,6 +2097,11 @@ void AC011K::loop()
             case 0x0D:
                 logger.printfln("Limit ack");
                 log_hex_privcomm_line(PrivCommRxBuffer);
+                if (phase_switch_stage == PHASE_SWITCH_APPLYING) {
+                    phase_switch_state.get("active_phases")->updateUint(phase_switch_target);
+                    logger.printfln("GD acknowledged %u-phase charging profile", phase_switch_target);
+                    finish_phase_switch();
+                }
                 // as of now we set the value when we send the setting to the GD
                 // set the value here? is the value in the ack?
                 // evse_state.get("allowed_charging_current")->updateUint(allowed_charging_current);
