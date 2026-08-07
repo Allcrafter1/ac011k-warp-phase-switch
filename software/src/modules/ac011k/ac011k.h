@@ -211,6 +211,7 @@ public:
     /* GD 1.7 uses PrivComm address 1; older releases use address 0. */
     uint16_t privcomm_address = 0;
     bool gd_configuration_pending = false;
+    bool internal_meter_recovery_attempted = false;
 
     // ConfigRoot evse_config;
     ConfigRoot* evse_state;

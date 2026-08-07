@@ -296,6 +296,10 @@ byte GetRtc[]                   = {0xAA, 0x10, 0x02, 0x00, 0x00};
 // GD 1.7.186: cmdAACtrlGetLoadPhaseAck (target firmware command ID 0x019)
 byte GetLoadPhase[]             = {0xAA, 0x10, 0x19, 0x00, 0x00};
 byte GetFaultCode[]             = {0xAA, 0x10, 0x20, 0x00, 0x00};
+// Restore the AC011K-AE-25 internal meter after a generic full-image flash
+// erased the manufacturer parameter pages: internal meter, no external
+// smart meter, 16.0 A maximum current.
+byte SetInternalMeter[]         = {0xAA, 0x18, 0x42, 0x04, 0x00, 0x00, 0x00, 0xA0, 0x00};
 byte TimeAck[]                  = {'c', 'a', 'y', 'm', 'd', 'h', 'm', 's', 0, 0, 0, 0};
 
 //D (2023-04-06 09:19:22) [EN_WSS, 708]: recv[0:83] [2,"11312954-a1d1-4023-923e-bf996401b021","ClearChargingProfile",{"connectorId":0}]
@@ -1934,6 +1938,17 @@ void AC011K::loop()
                     case 0x20: // cmdAACtrlGetFCode
                         logger.printfln("GD fault code reply");
                         log_hex_privcomm_line(PrivCommRxBuffer);
+                        if (len >= 8
+                            && getPrivCommRxBufferUint32(12) == 0x00100000
+                            && phase_switch_supported()
+                            && !internal_meter_recovery_attempted) {
+                            internal_meter_recovery_attempted = true;
+                            logger.printfln("Restoring GD 1.7 internal meter configuration after SMARTMETER_COMM_ERR");
+                            sendCommand(SetInternalMeter, sizeof(SetInternalMeter), sendSequenceNumber++);
+                        }
+                        break;
+                    case 0x42: // CFG_CME_ADDR_GetMetertype / set meter configuration
+                        logger.printfln("GD internal meter configuration accepted; GD will reboot in five seconds");
                         break;
                     default:
                         logger.printfln("Rx cmd_%.2X seq:%.2X len:%d crc:%.4X -  I don't know what %.2X means.", cmd, seq, len, crc, PrivCommRxBuffer[9]);
