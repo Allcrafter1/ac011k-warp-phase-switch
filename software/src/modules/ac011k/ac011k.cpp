@@ -694,7 +694,8 @@ bool AC011K::phase_switch_supported() {
     const String &hardware = evse.evse_hardware_configuration.get("Hardware")->asString();
     const String &firmware = evse.evse_hardware_configuration.get("FirmwareVersion")->asString();
     return (hardware == "AC011K-AE-25" || hardware == "AC011K-AE-25-STL")
-        && firmware == "1.7.186";
+        // The official package is named 1.7.186; the GD reports 1.7.18.
+        && firmware == "1.7.18";
 }
 
 void AC011K::set_phase_switch_stage(PhaseSwitchStage stage) {
@@ -725,7 +726,7 @@ void AC011K::request_phase_switch(uint8_t phases) {
         return;
     }
     if (!phase_switch_supported()) {
-        set_phase_switch_error(1, "Phase switching requires AC011K-AE-25 GD firmware 1.7.186");
+        set_phase_switch_error(1, "Phase switching requires AC011K-AE-25 GD package 1.7.186");
         return;
     }
     if (phase_switch_state.get("switching")->asBool()) {
@@ -920,7 +921,7 @@ int AC011K::bs_evse_start_charging() {
             logger.printfln("Unknown firmware version. Trying commands for latest version.");
             __attribute__ ((fallthrough));
         case 258:
-        case 186: // 1.7.186
+        case 18: // official package 1.7.186 reports 1.7.18
         case 460:
         case 538:
         case 653:
@@ -981,7 +982,7 @@ int AC011K::bs_evse_set_max_charging_current(uint16_t max_current) {
             logger.printfln("Unknown firmware version. Trying commands for latest version.");
             __attribute__ ((fallthrough));
         case 258:
-        case 186: // 1.7.186
+        case 18: // official package 1.7.186 reports 1.7.18
         case 460:
         case 538:
         case 653:
@@ -1218,6 +1219,35 @@ void AC011K::pre_setup() {
     });
 }
 
+void AC011K::configure_gd() {
+    logger.printfln("Configuring GD at PrivComm address %u", privcomm_address);
+    logger.printfln("cmdAC 0x0B CtrlSetRemoteStart  to 0");       sendCommand(SetRemoteStart,           sizeof(SetRemoteStart),           sendSequenceNumber++, false);
+    logger.printfln("cmdAC 0x09 CtrlSetS2OPENSTOP   to 0");       sendCommand(SetS2OPENSTOP,            sizeof(SetS2OPENSTOP),            sendSequenceNumber++, false);
+    logger.printfln("cmdAC 0x0A CtrlSetS2OPENLOCK   to 0");       sendCommand(SetS2OPENLOCK,            sizeof(SetS2OPENLOCK),            sendSequenceNumber++, false);
+    logger.printfln("cmdAC 0x0C CtrlSetOfflineStop  to 0");       sendCommand(SetOfflineStop,           sizeof(SetOfflineStop),           sendSequenceNumber++, false);
+    logger.printfln("cmdAA ClockAlignedDataInterval to 10s");     sendCommand(ClockAlignedDataInterval, sizeof(ClockAlignedDataInterval), sendSequenceNumber++, false);
+    logger.printfln("cmdAC 0x0D SetOfflineEnergy    to 3000Wh");  sendCommand(SetOfflineEnergy,         sizeof(SetOfflineEnergy),         sendSequenceNumber++, false);
+    logger.printfln("cmdAA CtrlSetGunTime 30");                   sendCommand(SetGunTime,               sizeof(SetGunTime),               sendSequenceNumber++, false);
+    logger.printfln("cmdAA CtrlSetSmartparam");                   sendCommand(SetSmartparam,            sizeof(SetSmartparam),            sendSequenceNumber++, false);
+    GetRTC();
+
+    // This triggers cmd_02 with serial, hardware and firmware version.
+    sendCommand(SetReset, sizeof(SetReset), sendSequenceNumber++, false);
+
+    PrivCommTxBuffer[PayloadStart + 0] = 0x18;
+    PrivCommTxBuffer[PayloadStart + 1] = 0x08;
+    PrivCommTxBuffer[PayloadStart + 2] = 0x02;
+    PrivCommTxBuffer[PayloadStart + 3] = 0x00;
+    PrivCommTxBuffer[PayloadStart + 4] = 240;
+    PrivCommTxBuffer[PayloadStart + 5] = 0x00;
+    PrivCommSend(0xAA, 6, PrivCommTxBuffer);
+
+    sendCommand(Init15, sizeof(Init15), sendSequenceNumber++, false);
+    sendCommand(SetGunTime, sizeof(SetGunTime), sendSequenceNumber++, false);
+    sendCommand(ClearChargingProfile, sizeof(ClearChargingProfile), sendSequenceNumber++, false);
+    sendCommand(GetMaxCurrLimit, sizeof(GetMaxCurrLimit), sendSequenceNumber++, false);
+}
+
 void AC011K::setup() {
     logger.printfln("BUILD info: %s.", build_info_str());
     evse.setup_evse();
@@ -1264,27 +1294,7 @@ void AC011K::setup() {
     //Serial2.setTimeout(90);
     logger.printfln("Set up PrivComm: 115200, SERIAL_8N1, RX 26, TX 27");
 
-    logger.printfln("cmdAC 0x0B CtrlSetRemoteStart  to 0");       sendCommand(SetRemoteStart,           sizeof(SetRemoteStart),           sendSequenceNumber++, false);
-    logger.printfln("cmdAC 0x09 CtrlSetS2OPENSTOP   to 0");       sendCommand(SetS2OPENSTOP,            sizeof(SetS2OPENSTOP),            sendSequenceNumber++, false);
-    logger.printfln("cmdAC 0x0A CtrlSetS2OPENLOCK   to 0");       sendCommand(SetS2OPENLOCK,            sizeof(SetS2OPENLOCK),            sendSequenceNumber++, false);
-    logger.printfln("cmdAC 0x0C CtrlSetOfflineStop  to 0");       sendCommand(SetOfflineStop,           sizeof(SetOfflineStop),           sendSequenceNumber++, false);
-    logger.printfln("cmdAA ClockAlignedDataInterval to 10s");     sendCommand(ClockAlignedDataInterval, sizeof(ClockAlignedDataInterval), sendSequenceNumber++, false);
-    logger.printfln("cmdAC 0x0D SetOfflineEnergy    to 3000Wh");  sendCommand(SetOfflineEnergy,         sizeof(SetOfflineEnergy),         sendSequenceNumber++, false);
-    logger.printfln("cmdAA CtrlSetGunTime 30");                   sendCommand(SetGunTime,               sizeof(SetGunTime),               sendSequenceNumber++, false);
-    logger.printfln("cmdAA CtrlSetSmartparam");                   sendCommand(SetSmartparam,            sizeof(SetSmartparam),            sendSequenceNumber++, false);
-    GetRTC();
-
-    // ctrl_cmd set ack done, type:0 // this triggers 0x02 SN, Hardware, Version
-    sendCommand(SetReset, sizeof(SetReset), sendSequenceNumber++, false);
-
-    // ctrl_cmd set heart beat time out
-    PrivCommTxBuffer[PayloadStart + 0] = 0x18;
-    PrivCommTxBuffer[PayloadStart + 1] = 0x08;
-    PrivCommTxBuffer[PayloadStart + 2] = 0x02;
-    PrivCommTxBuffer[PayloadStart + 3] = 0x00;
-    PrivCommTxBuffer[PayloadStart + 4] =  240;  /* 240 sec heartbeat timeout */
-    PrivCommTxBuffer[PayloadStart + 5] = 0x00;  /* heartbeat timeout 16bit   */
-    PrivCommSend(0xAA, 6, PrivCommTxBuffer);
+    configure_gd();
 
 
 //W (2021-04-11 18:36:27) [PRIV_COMM, 1764]: Tx(cmd_AA len:15) :  FA 03 00 00 AA 40 05 00 18 09 01 00 00 F9 36
@@ -1296,7 +1306,6 @@ void AC011K::setup() {
 //I (2021-04-11 18:36:31) [PRIV_COMM, 279]: ctrl_cmd set start power mode done -> minpower: 15.306.752
 
     // ctrl_cmd set start power mode done
-    sendCommand(Init15, sizeof(Init15), sendSequenceNumber++, false);
 
 
 //W (1970-01-01 00:00:03) [PRIV_COMM, 1764]: Tx(cmd_AA len:14) :  FA 03 00 00 AA 02 04 00 18 2A 00 00 DB 76
@@ -1304,10 +1313,6 @@ void AC011K::setup() {
 //E (1970-01-01 00:00:03) [PRIV_COMM, 78]: cmdAACtrlcantestsetAck test cancom...111
 
     // cmdAACtrlcantestsetAck test cancom...111
-    sendCommand(SetGunTime, sizeof(SetGunTime), sendSequenceNumber++, false);
-
-    sendCommand(ClearChargingProfile, sizeof(ClearChargingProfile), sendSequenceNumber++, false);
-    sendCommand(GetMaxCurrLimit, sizeof(GetMaxCurrLimit), sendSequenceNumber++, false);
 
 /*
     do { // wait for the first PRIVCOMM signal to decide if we have a GD chip to talk to
@@ -1386,13 +1391,21 @@ void AC011K::loop()
                     }
                     break;
                 case PRIVCOMM_ADDR:
-                    if(rxByte == 0x00) {
-                        if(PrivCommRxBufferPointer == 4) { // this was the second byte of the address, move on
+                    if(PrivCommRxBufferPointer == 4) { // second address byte received
+                        const uint16_t received_address = getPrivCommRxBufferUint16(2);
+                        if (received_address <= 1) {
+                            if (received_address != privcomm_address) {
+                                logger.printfln("GD PrivComm address changed from %u to %u", privcomm_address, received_address);
+                                privcomm_address = received_address;
+                                PrivCommTxBuffer[2] = PrivCommRxBuffer[2];
+                                PrivCommTxBuffer[3] = PrivCommRxBuffer[3];
+                                gd_configuration_pending = true;
+                            }
                             PrivCommRxState = PRIVCOMM_CMD;
+                        } else {
+                            logger.printfln("PRIVCOMM ERR: got Rx Packet with unsupported Address %.2X%.2X.", PrivCommRxBuffer[2], PrivCommRxBuffer[3]);
+                            PrivCommRxState = PRIVCOMM_MAGIC;
                         }
-                    } else {
-                        logger.printfln("PRIVCOMM ERR: got Rx Packet with wrong Address %.2X%.2X. PrivCommRxBufferPointer: %d", PrivCommRxBuffer[2], PrivCommRxBuffer[3], PrivCommRxBufferPointer);
-                        PrivCommRxState = PRIVCOMM_MAGIC;
                     }
                     break;
                 case PRIVCOMM_CMD:
@@ -1420,8 +1433,8 @@ void AC011K::loop()
                         // hopefully there are no more packets like this, or enough to recognize a pattern
                         if(PrivCommRxBuffer[PrivCommRxBufferPointer-4] == 0xFA &&
                            PrivCommRxBuffer[PrivCommRxBufferPointer-3] == 0x03 &&
-                           PrivCommRxBuffer[PrivCommRxBufferPointer-2] == 0x00 &&
-                           PrivCommRxBuffer[PrivCommRxBufferPointer-1] == 0x00) {
+                           PrivCommRxBuffer[PrivCommRxBufferPointer-2] == PrivCommTxBuffer[2] &&
+                           PrivCommRxBuffer[PrivCommRxBufferPointer-1] == PrivCommTxBuffer[3]) {
                             logger.printfln("PRIVCOMM BUG: process the next command albeit the last one was not finished. Buggy! cmd:%.2X len:%d cut off:%d", cmd, len, PrivCommRxBufferPointer-4);
                             PrivCommRxState = PRIVCOMM_CMD;
                             PrivCommRxBufferPointer = 4;
@@ -1476,24 +1489,44 @@ void AC011K::loop()
 
     if(cmd_to_process) {
         switch( cmd ) {
-            case 0x02: // Info: Serial number, Version
+            case 0x02: { // Info: Serial number, Version
 //W (1970-01-01 00:08:52) [PRIV_COMM, 1919]: Rx(cmd_02 len:135) :  FA 03 00 00 02 26 7D 00 53 4E 31 30 30 35 32 31 30 31 31 39 33 35 37 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 24 D1 00 41 43 30 31 31 4B 2D 41 55 2D 32 35 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 31 2E 31 2E 32 37 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 09 00 00 00 00 00 5A 00 1E 00 00 00 00 00 00 00 00 00 D9 25
 //W (1970-01-01 00:08:52) [PRIV_COMM, 1764]: Tx(cmd_A2 len:11) :  FA 03 00 00 A2 26 01 00 00 99 E0
                 if(ac011k_hardware.config.get("verbose_communication")->asBool()) { // we may be silent for the heartbeat //TODO show it at first and after an hour?
                     logger.printfln("Rx cmd_%.2X seq:%.2X len:%d crc:%.4X - Serial number and version.", cmd, seq, len, crc);
                 }
-                sprintf(str, "%s", PrivCommRxBuffer+8);
-                evse.evse_hardware_configuration.get("SerialNumber")->updateString(str);
+                String serial_number;
+                const uint16_t packet_end = len + 8;
+                for (uint16_t i = 8; i < 40 && i < packet_end; ++i) {
+                    if (PrivCommRxBuffer[i] < 0x20 || PrivCommRxBuffer[i] > 0x7E)
+                        break;
+                    serial_number += (char)PrivCommRxBuffer[i];
+                }
+                evse.evse_hardware_configuration.get("SerialNumber")->updateString(serial_number);
                 if(strlen(local_uid_str) == 0) {
                     sprintf(local_uid_str, "%s",PrivCommRxBuffer+10);
                     logger.printfln("This seems to be the first boot after a reset. Setting the UID based on the serial number to %s and reboot.", local_uid_str);
                     ac011k_hardware.persist_config();
                     trigger_reboot("Empty UID");
                 }
-                sprintf(str, "%s",PrivCommRxBuffer+43);
-                evse.evse_hardware_configuration.get("Hardware")->updateString(str);
-                sprintf(str, "%s",PrivCommRxBuffer+91);
-                evse.evse_hardware_configuration.get("FirmwareVersion")->updateString(str);
+                String hardware;
+                for (uint16_t i = 43; i < 91 && i < packet_end; ++i) {
+                    if (PrivCommRxBuffer[i] < 0x20 || PrivCommRxBuffer[i] > 0x7E)
+                        break;
+                    hardware += (char)PrivCommRxBuffer[i];
+                }
+                evse.evse_hardware_configuration.get("Hardware")->updateString(hardware);
+
+                String firmware;
+                for (uint16_t i = 91; i < 128 && i < packet_end; ++i) {
+                    if (PrivCommRxBuffer[i] < 0x20 || PrivCommRxBuffer[i] > 0x7E)
+                        break;
+                    firmware += (char)PrivCommRxBuffer[i];
+                }
+                const int version_marker = firmware.indexOf("_V");
+                if (version_marker >= 0)
+                    firmware = firmware.substring(version_marker + 2);
+                evse.evse_hardware_configuration.get("FirmwareVersion")->updateString(firmware);
                 if(!evse.evse_hardware_configuration.get("initialized")->asBool()) {
                     evse.initialized = (
                             (evse.evse_hardware_configuration.get("Hardware")->asString().compareTo("AC011K-AU-25") == 0) 
@@ -1515,7 +1548,7 @@ void AC011K::loop()
                                 && (evse.evse_hardware_configuration.get("FirmwareVersion")->asString().substring(4).toInt() <= 653)  // higest known working version (we assume earlier versions work as well)
                             )
                             || (
-                                evse.evse_hardware_configuration.get("FirmwareVersion")->asString().compareTo("1.7.186") == 0
+                                evse.evse_hardware_configuration.get("FirmwareVersion")->asString().compareTo("1.7.18") == 0
                             )
                         );
                     evse.evse_hardware_configuration.get("initialized")->updateBool(evse.initialized);
@@ -1537,6 +1570,7 @@ void AC011K::loop()
                 }
                 PrivCommAck(cmd, PrivCommTxBuffer); // privCommCmdA2InfoSynAck
                 break;
+            }
 
             case 0x03:
 //W (1970-01-01 00:08:52) [PRIV_COMM, 1919]: Rx(cmd_03 len:24) :  FA 03 00 00 03 27 0E 00 00 09 09 0D 00 00 02 00 00 00 00 00 04 00 80 BC
@@ -2122,6 +2156,14 @@ void AC011K::loop()
                 break;
         }  //switch process cmd
         cmd_to_process = false;
+    }
+
+    // GD 1.7 changes its application-mode address from 0 to 1. The initial
+    // setup commands were sent before the first incoming packet revealed that
+    // address, so repeat them once using the detected header.
+    if (gd_configuration_pending && !firmware_update_running) {
+        gd_configuration_pending = false;
+        configure_gd();
     }
 
     evse.evse_state.get("time_since_state_change")->updateUint(millis() - evse.evse_state.get("last_state_change")->asUint());

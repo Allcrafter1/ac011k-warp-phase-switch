@@ -143,6 +143,7 @@ public:
     void update_evseStatus(uint8_t evseStatus);
     time_t now();
     void fillTimeGdCommand(byte *datetime);
+    void configure_gd();
     uint16_t getPrivCommRxBufferUint16(uint16_t index);
     uint32_t getPrivCommRxBufferUint32(uint16_t index);
 
@@ -206,6 +207,10 @@ public:
     /* Retry the initial boot-mode request of the GD updater. */
     uint32_t last_gd_boot_request = 0;
     uint8_t gd_boot_request_attempts = 0;
+
+    /* GD 1.7 uses PrivComm address 1; older releases use address 0. */
+    uint16_t privcomm_address = 0;
+    bool gd_configuration_pending = false;
 
     // ConfigRoot evse_config;
     ConfigRoot* evse_state;
