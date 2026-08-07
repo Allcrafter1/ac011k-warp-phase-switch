@@ -295,6 +295,7 @@ byte cantestsetAck[]            = {0xAA, 0x18, 0x2A, 0x00, 0x00}; // cmdAACtrlca
 byte GetRtc[]                   = {0xAA, 0x10, 0x02, 0x00, 0x00};
 // GD 1.7.186: cmdAACtrlGetLoadPhaseAck (target firmware command ID 0x019)
 byte GetLoadPhase[]             = {0xAA, 0x10, 0x19, 0x00, 0x00};
+byte GetFaultCode[]             = {0xAA, 0x10, 0x20, 0x00, 0x00};
 byte TimeAck[]                  = {'c', 'a', 'y', 'm', 'd', 'h', 'm', 's', 0, 0, 0, 0};
 
 //D (2023-04-06 09:19:22) [EN_WSS, 708]: recv[0:83] [2,"11312954-a1d1-4023-923e-bf996401b021","ClearChargingProfile",{"connectorId":0}]
@@ -1563,7 +1564,7 @@ void AC011K::loop()
                         logger.printfln("EN+ GD EVSE initialized.");
                         phase_switch_state.get("supported")->updateBool(phase_switch_supported());
                         if (phase_switch_supported())
-                            send_get_load_phase();
+                            sendCommand(GetFaultCode, sizeof(GetFaultCode), sendSequenceNumber++, false);
                     } else {
                         logger.printfln("EN+ GD EVSE Firmware Version or Hardware is not supported.");
                     }
@@ -1929,6 +1930,10 @@ void AC011K::loop()
                             logger.printfln("Invalid GD load phase reply");
                             log_hex_privcomm_line(PrivCommRxBuffer);
                         }
+                        break;
+                    case 0x20: // cmdAACtrlGetFCode
+                        logger.printfln("GD fault code reply");
+                        log_hex_privcomm_line(PrivCommRxBuffer);
                         break;
                     default:
                         logger.printfln("Rx cmd_%.2X seq:%.2X len:%d crc:%.4X -  I don't know what %.2X means.", cmd, seq, len, crc, PrivCommRxBuffer[9]);
