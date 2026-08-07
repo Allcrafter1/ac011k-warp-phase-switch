@@ -293,8 +293,8 @@ byte SetSmartparam[]            = {0xAA, 0x18, 0x25, 0x0E, 0x00, 0x05, 0x00, 0x0
 byte SetReset[]                 = {0xAA, 0x18, 0x12, 0x01, 0x00, 3}; // 112 cmdAACtrlSetReset, 3 // this triggers 0x02 SN, Hardware, Version
 byte cantestsetAck[]            = {0xAA, 0x18, 0x2A, 0x00, 0x00}; // cmdAACtrlcantestsetAck test cancom...111
 byte GetRtc[]                   = {0xAA, 0x10, 0x02, 0x00, 0x00};
-// GD 1.7.186: cmdAACtrlGetLoadPhaseAck (target firmware command ID 0x150)
-byte GetLoadPhase[]             = {0xAA, 0x10, 0x50, 0x00, 0x00};
+// GD 1.7.186: cmdAACtrlGetLoadPhaseAck (target firmware command ID 0x019)
+byte GetLoadPhase[]             = {0xAA, 0x10, 0x19, 0x00, 0x00};
 byte TimeAck[]                  = {'c', 'a', 'y', 'm', 'd', 'h', 'm', 's', 0, 0, 0, 0};
 
 //D (2023-04-06 09:19:22) [EN_WSS, 708]: recv[0:83] [2,"11312954-a1d1-4023-923e-bf996401b021","ClearChargingProfile",{"connectorId":0}]
@@ -1920,7 +1920,7 @@ void AC011K::loop()
                     case 0x3F: // 
                         logger.printfln("Rx cmd_%.2X seq:%.2X len:%d crc:%.4X - cmdAAInit7Ack", cmd, seq, len, crc);
                         break;
-                    case 0x50: // GD 1.7.186 cmdAACtrlGetLoadPhaseAck
+                    case 0x19: // GD 1.7.186 cmdAACtrlGetLoadPhaseAck
                         if (len >= 5 && (PrivCommRxBuffer[12] == 1 || PrivCommRxBuffer[12] == 3)) {
                             const uint8_t phases = PrivCommRxBuffer[12];
                             phase_switch_state.get("active_phases")->updateUint(phases);

@@ -168,7 +168,7 @@ public:
      *
      * The GD controls the contactors. The ESP only sends a charging profile
      * containing numberPhases after charging has stopped and confirms the
-     * result with cmdAA CtrlGetLoadPhase (AA 10 50).
+     * result with cmdAA CtrlGetLoadPhase (AA 10 19).
      */
     ConfigRoot phase_switch_state;
     ConfigRoot phase_switch_update;
