@@ -699,8 +699,9 @@ bool AC011K::phase_switch_supported() {
     const String &hardware = evse.evse_hardware_configuration.get("Hardware")->asString();
     const String &firmware = evse.evse_hardware_configuration.get("FirmwareVersion")->asString();
     return (hardware == "AC011K-AE-25" || hardware == "AC011K-AE-25-STL")
-        // The official package is named 1.7.186; the GD reports 1.7.18.
-        && firmware == "1.7.18";
+        // Before its parameter migration the GD reports 1.7.18; afterwards it
+        // reports the complete package version 1.7.186.
+        && (firmware == "1.7.18" || firmware == "1.7.186");
 }
 
 void AC011K::set_phase_switch_stage(PhaseSwitchStage stage) {
@@ -927,6 +928,7 @@ int AC011K::bs_evse_start_charging() {
             __attribute__ ((fallthrough));
         case 258:
         case 18: // official package 1.7.186 reports 1.7.18
+        case 186:
         case 460:
         case 538:
         case 653:
@@ -988,6 +990,7 @@ int AC011K::bs_evse_set_max_charging_current(uint16_t max_current) {
             __attribute__ ((fallthrough));
         case 258:
         case 18: // official package 1.7.186 reports 1.7.18
+        case 186:
         case 460:
         case 538:
         case 653:
@@ -1552,9 +1555,8 @@ void AC011K::loop()
                                 evse.evse_hardware_configuration.get("FirmwareVersion")->asString().startsWith("1.2.", 0)  // known working: 1.2.653
                                 && (evse.evse_hardware_configuration.get("FirmwareVersion")->asString().substring(4).toInt() <= 653)  // higest known working version (we assume earlier versions work as well)
                             )
-                            || (
-                                evse.evse_hardware_configuration.get("FirmwareVersion")->asString().compareTo("1.7.18") == 0
-                            )
+                            || (evse.evse_hardware_configuration.get("FirmwareVersion")->asString().compareTo("1.7.18") == 0)
+                            || (evse.evse_hardware_configuration.get("FirmwareVersion")->asString().compareTo("1.7.186") == 0)
                         );
                     evse.evse_hardware_configuration.get("initialized")->updateBool(evse.initialized);
                     initialized = evse.initialized;
