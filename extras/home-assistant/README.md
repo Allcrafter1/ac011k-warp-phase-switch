@@ -48,13 +48,13 @@ automation:
 ## Regelverhalten
 
 - unterhalb der technisch möglichen Mindestleistung wird `0 mA` angefordert;
-- ansonsten werden aus Sollleistung, 230 V und aktiver Phasenzahl 6–16 A
+- ansonsten werden aus Sollleistung, 230 V und aktiver Phasenzahl 8–16 A
   berechnet;
-- ab 4,5 kW für fünf Minuten wird auf drei Phasen gewechselt;
-- unter 3,5 kW für zehn Minuten wird auf eine Phase gewechselt;
+- ab 6 kW für fünf Minuten wird auf drei Phasen gewechselt;
+- unter 5 kW für zehn Minuten wird auf eine Phase gewechselt;
 - die Firmware erzwingt zusätzlich mindestens 300 Sekunden zwischen zwei
   Umschaltungen und fünf Sekunden lastfreie Relaiszeit.
 
-Die Hysterese verhindert Pendeln um die dreiphasige Mindestleistung von etwa
-4,14 kW. Das Package schaltet die EMHASS-Regelung absichtlich nicht automatisch
+Die Hysterese verhindert Pendeln um die für diese Wallbox praktisch ermittelte
+dreiphasige Mindestleistung von etwa 5,52 kW bei 8 A. Das Package schaltet die EMHASS-Regelung absichtlich nicht automatisch
 ein: Zuerst müssen L2/L3 am realen Fahrzeug elektrisch verifiziert werden.

@@ -167,8 +167,8 @@ public:
      * GD 1.7.186 phase switching
      *
      * The GD controls the contactors. The ESP only sends a charging profile
-     * containing numberPhases after charging has stopped and confirms the
-     * result with cmdAA CtrlGetLoadPhase (AA 10 19).
+     * containing numberPhases after charging has stopped. GD 1.7.186 confirms
+     * accepting that profile with cmd0D; it does not implement GetLoadPhase.
      */
     ConfigRoot phase_switch_state;
     ConfigRoot phase_switch_update;
@@ -212,6 +212,7 @@ public:
     uint16_t privcomm_address = 0;
     bool gd_configuration_pending = false;
     bool internal_meter_recovery_attempted = false;
+    bool fault_code_query_pending = false;
 
     // ConfigRoot evse_config;
     ConfigRoot* evse_state;

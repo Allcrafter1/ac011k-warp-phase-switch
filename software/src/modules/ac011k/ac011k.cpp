@@ -1062,6 +1062,8 @@ void AC011K::update_evseStatus(uint8_t evseStatus) {
     //if(!ac011k_hardware.config.get("verbose_communication")->asBool() && (evseStatus != last_evseStatus)) {
     if(evseStatus != last_evseStatus) {
         logger.printfln("EVSE GD Status now %d: %s, allowed charging current %dmA", evseStatus, evse_status_text[evseStatus], evse.evse_state.get("allowed_charging_current")->asUint());
+        if (evseStatus == 9 && phase_switch_supported())
+            fault_code_query_pending = true;
     }
 
     switch (evseStatus) {
@@ -1180,6 +1182,7 @@ void AC011K::pre_setup() {
         {"last_error", Config::Uint8(0)},
         {"last_error_text", Config::Str("", 0, 96)},
         {"last_switch_ms", Config::Uint32(0)},
+        {"gd_fault_code", Config::Uint32(0)},
     });
     phase_switch_update = Config::Object({
         {"phases", Config::Uint8(3)},
@@ -1918,7 +1921,10 @@ void AC011K::loop()
                         }
                         break;
                     case 0x20: // cmdAACtrlGetFCode
-                        logger.printfln("GD fault code reply");
+                        phase_switch_state.get("gd_fault_code")->updateUint(
+                            len >= 8 ? getPrivCommRxBufferUint32(12) : 0);
+                        logger.printfln("GD fault code reply: 0x%08X",
+                            phase_switch_state.get("gd_fault_code")->asUint());
                         log_hex_privcomm_line(PrivCommRxBuffer);
                         if (len >= 8
                             && getPrivCommRxBufferUint32(12) == 0x00100000
@@ -2171,6 +2177,11 @@ void AC011K::loop()
     if (gd_configuration_pending && !firmware_update_running) {
         gd_configuration_pending = false;
         configure_gd();
+    }
+
+    if (fault_code_query_pending && !firmware_update_running) {
+        fault_code_query_pending = false;
+        sendCommand(GetFaultCode, sizeof(GetFaultCode), sendSequenceNumber++, false);
     }
 
     evse.evse_state.get("time_since_state_change")->updateUint(millis() - evse.evse_state.get("last_state_change")->asUint());

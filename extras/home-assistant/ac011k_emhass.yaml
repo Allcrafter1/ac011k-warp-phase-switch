@@ -51,7 +51,7 @@ automation:
       - trigger: template
         value_template: >-
           {{ is_state('input_boolean.ac011k_emhass_control', 'on')
-             and states('input_number.ac011k_emhass_target_power') | float(0) >= 4500
+             and states('input_number.ac011k_emhass_target_power') | float(0) >= 6000
              and states('sensor.ac011k_angeforderte_phasen_emhass') | int(0) != 3
              and is_state('binary_sensor.ac011k_phasenumschaltung_emhass', 'off') }}
         for: "00:05:00"
@@ -70,7 +70,7 @@ automation:
       - trigger: template
         value_template: >-
           {{ is_state('input_boolean.ac011k_emhass_control', 'on')
-             and states('input_number.ac011k_emhass_target_power') | float(0) <= 3500
+             and states('input_number.ac011k_emhass_target_power') | float(0) <= 5000
              and states('sensor.ac011k_angeforderte_phasen_emhass') | int(0) != 1
              and is_state('binary_sensor.ac011k_phasenumschaltung_emhass', 'off') }}
         for: "00:10:00"
@@ -103,13 +103,13 @@ automation:
     variables:
       target_w: "{{ states('input_number.ac011k_emhass_target_power') | float(0) }}"
       phases: "{{ states('sensor.ac011k_aktive_phasen_emhass') | int(1) }}"
-      minimum_w: "{{ 230 * phases * 6 }}"
+      minimum_w: "{{ 230 * phases * 8 }}"
       calculated_ma: "{{ (target_w * 1000 / (230 * phases)) | int(0) }}"
       current_ma: >-
         {% if target_w < minimum_w %}
           0
         {% else %}
-          {{ [[calculated_ma, 6000] | max, 16000] | min }}
+          {{ [[calculated_ma, 8000] | max, 16000] | min }}
         {% endif %}
     actions:
       - delay: "00:00:02"
