@@ -166,13 +166,12 @@ public:
     void validate_physical_phase_count();
 
     /*
-     * GD 1.7.186 phase switching
+     * Experimental phase-switch diagnostics.
      *
-     * The GD controls the contactors. Sungrow's ESP distinguishes the start
-     * power modes "normal" and "minPower". The mode is applied only while the
-     * contactors are load-free and is followed by the matching OCPP profile.
-     * Neither acknowledgement proves the physical relay state, so it is
-     * verified from the three measured phase currents after charging starts.
+     * GD 1.7.186 acknowledges numberPhases and its start-power-mode byte, but
+     * the legacy AC011K-AE-25 did not physically switch during the guarded
+     * live test. phase_switch_supported() therefore remains fail-closed until
+     * an independently controllable contactor path is proven on the PCB.
      */
     ConfigRoot phase_switch_state;
     ConfigRoot phase_switch_update;

@@ -1,17 +1,17 @@
 # AC011K mit Home Assistant und EMHASS
 
-Die Wallbox veröffentlicht seit dem gepatchten Build automatisch folgende
-Home-Assistant-Discovery-Entities:
+Die Wallbox enthält experimentelle Diagnose-Entities für eine spätere
+Phasenumschaltung:
 
 - Auswahl `Ladephasen` (`1` oder `3`)
 - Sensor `Aktive Ladephasen`
 - Binärsensor `Phasenumschaltung aktiv`
 
-Die Discovery-Konfiguration ist auf der Wallbox bereits aktiviert. Das
-zusätzliche Package [`ac011k_emhass.yaml`](ac011k_emhass.yaml) bildet eine
-stabile Schnittstelle zu EMHASS und verwendet absichtlich die MQTT-Topics
-direkt, damit es nicht von automatisch vergebenen Home-Assistant-Entity-IDs
-abhängt.
+**Die Phasenumschaltung ist für AC011K-AE-25 derzeit absichtlich gesperrt.**
+GD 1.7.186 quittiert die Phasenangabe, schaltet auf der geprüften Hardware
+aber weiterhin alle drei Phasen. Das zusätzliche Package
+[`ac011k_emhass.yaml`](ac011k_emhass.yaml) ist deshalb nur eine Vorbereitung
+und darf noch nicht aktiviert werden.
 
 ## Installation
 
@@ -25,8 +25,9 @@ abhängt.
 3. Konfiguration prüfen und Home Assistant neu starten.
 4. EMHASS soll die geplante Wallboxleistung in Watt in
    `input_number.ac011k_emhass_target_power` schreiben.
-5. Erst nach dem elektrischen 1-/3-Phasen-Test
-   `input_boolean.ac011k_emhass_control` einschalten.
+5. `input_boolean.ac011k_emhass_control` ausgeschaltet lassen. Es darf erst
+   nach einem spannungsfreien Hardware-Nachweis und einem lastfreien
+   1-/3-Phasen-Test eingeschaltet werden.
 
 Ein Beispiel, falls der relevante EMHASS-Wert bereits als Sensor vorliegt
 (den Entity-Namen an die eigene Installation anpassen):

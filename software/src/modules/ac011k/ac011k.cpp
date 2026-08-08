@@ -695,10 +695,11 @@ void AC011K::sendChargingLimit3(uint8_t currentLimit, byte sendSequenceNumber, u
 }
 
 void AC011K::send_start_power_mode(uint8_t phases) {
-    // Sungrow's official ESP calls 0 "normal" and 1 "minPower" / "SMALL PWR
-    // START". On AC011E this is the separate control path used before a
-    // low-power start; numberPhases in the OCPP profile alone does not operate
-    // the relays on AC011K-AE-25 V1.7.186.
+    // Command 0x109 stores Sungrow's "normal" / "minPower" start preference.
+    // Reverse engineering of AC011K-AE-25 V1.7.186 shows that the GD only
+    // stores and returns this byte; relayControl_11KW never reads it. Keep the
+    // helper for protocol diagnostics, but never treat its acknowledgement as
+    // proof of a physical phase change.
     SetStartPowerMode[5] = (phases == 1) ? 1 : 0;
     logger.printfln("Applying GD start power mode %s for %u phase(s)",
         SetStartPowerMode[5] ? "minPower" : "normal", phases);
@@ -706,12 +707,17 @@ void AC011K::send_start_power_mode(uint8_t phases) {
 }
 
 bool AC011K::phase_switch_supported() {
-    const String &hardware = evse.evse_hardware_configuration.get("Hardware")->asString();
-    const String &firmware = evse.evse_hardware_configuration.get("FirmwareVersion")->asString();
-    return (hardware == "AC011K-AE-25" || hardware == "AC011K-AE-25-STL")
-        // Before its parameter migration the GD reports 1.7.18; afterwards it
-        // reports the complete package version 1.7.186.
-        && (firmware == "1.7.18" || firmware == "1.7.186");
+    // Fail closed. On the legacy AC011K-AE-25, GD 1.7.186 acknowledges both
+    // OCPP numberPhases and start-power-mode values without changing the
+    // physical contactors. A live current measurement confirmed three active
+    // phases after requesting one. The newer AC011E-01 advertised by Sungrow
+    // uses a different hardware control path, even though its package can
+    // contain a GD image with the same AC011K-AE-25 name.
+    //
+    // Re-enable this only after the PCB revision and an independently
+    // controllable N/L1 versus L2/L3 contactor path have been verified without
+    // a vehicle connected.
+    return false;
 }
 
 void AC011K::set_phase_switch_stage(PhaseSwitchStage stage) {
@@ -735,7 +741,7 @@ void AC011K::request_phase_switch(uint8_t phases) {
         return;
     }
     if (!phase_switch_supported()) {
-        set_phase_switch_error(1, "Phase switching requires AC011K-AE-25 GD package 1.7.186");
+        set_phase_switch_error(1, "No verified physical phase-switch path on AC011K-AE-25");
         return;
     }
     if (phase_switch_state.get("switching")->asBool()) {
