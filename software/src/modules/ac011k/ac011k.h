@@ -173,6 +173,7 @@ public:
     ConfigRoot phase_switch_state;
     ConfigRoot phase_switch_update;
     ConfigRoot phase_switch_config;
+    ConfigRoot gd_meter_config_update;
 
     enum PhaseSwitchStage : uint8_t {
         PHASE_SWITCH_IDLE = 0,

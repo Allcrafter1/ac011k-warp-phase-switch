@@ -296,10 +296,11 @@ byte GetRtc[]                   = {0xAA, 0x10, 0x02, 0x00, 0x00};
 // GD 1.7.186: cmdAACtrlGetLoadPhaseAck (target firmware command ID 0x019)
 byte GetLoadPhase[]             = {0xAA, 0x10, 0x19, 0x00, 0x00};
 byte GetFaultCode[]             = {0xAA, 0x10, 0x20, 0x00, 0x00};
-// Restore the AC011K-AE-25 internal meter after a generic full-image flash
-// erased the manufacturer parameter pages: internal meter, no external
-// smart meter, 16.0 A maximum current.
-byte SetInternalMeter[]         = {0xAA, 0x18, 0x42, 0x04, 0x00, 0x00, 0x00, 0xA0, 0x00};
+// GD 1.7 command 0x142 stores the external load-balancing sensor type,
+// product/presence flag and the charger maximum current in 0.1 A. Sungrow's
+// own ESP firmware uses type 10/product 0 when no external CT or smart meter
+// is installed. The wallbox's internal three-phase energy meter is separate.
+byte SetNoExternalMeter[]       = {0xAA, 0x18, 0x42, 0x04, 0x00, 0x0A, 0x00, 0xA0, 0x00};
 byte TimeAck[]                  = {'c', 'a', 'y', 'm', 'd', 'h', 'm', 's', 0, 0, 0, 0};
 
 //D (2023-04-06 09:19:22) [EN_WSS, 708]: recv[0:83] [2,"11312954-a1d1-4023-923e-bf996401b021","ClearChargingProfile",{"connectorId":0}]
@@ -1183,9 +1184,17 @@ void AC011K::pre_setup() {
         {"last_error_text", Config::Str("", 0, 96)},
         {"last_switch_ms", Config::Uint32(0)},
         {"gd_fault_code", Config::Uint32(0)},
+        {"gd_meter_mode", Config::Uint8(0xFF)},
+        {"gd_meter_product", Config::Uint8(0xFF)},
+        {"gd_configured_max_current_deciamp", Config::Uint16(0)},
+        {"gd_meter_config_pending", Config::Bool(false)},
+        {"gd_meter_config_error", Config::Str("", 0, 96)},
     });
     phase_switch_update = Config::Object({
         {"phases", Config::Uint8(3)},
+    });
+    gd_meter_config_update = Config::Object({
+        {"restore_no_external_meter", Config::Bool(false)},
     });
     phase_switch_config = ConfigRoot(Config::Object({
         {"default_phases", Config::Uint8(3)},
@@ -1927,16 +1936,33 @@ void AC011K::loop()
                             phase_switch_state.get("gd_fault_code")->asUint());
                         log_hex_privcomm_line(PrivCommRxBuffer);
                         if (len >= 8
-                            && getPrivCommRxBufferUint32(12) == 0x00100000
+                            && (getPrivCommRxBufferUint32(12) == 0x00100000
+                                || getPrivCommRxBufferUint32(12) == 0x00200000)
                             && phase_switch_supported()
-                            && !internal_meter_recovery_attempted) {
+                            && !internal_meter_recovery_attempted
+                            && evse.evse_state.get("iec61851_state")->asUint() == IEC_STATE_A) {
                             internal_meter_recovery_attempted = true;
-                            logger.printfln("Restoring GD 1.7 internal meter configuration after SMARTMETER_COMM_ERR");
-                            sendCommand(SetInternalMeter, sizeof(SetInternalMeter), sendSequenceNumber++);
+                            phase_switch_state.get("gd_meter_config_pending")->updateBool(true);
+                            logger.printfln("Restoring GD 1.7 no-external-meter configuration after meter communication fault");
+                            sendCommand(SetNoExternalMeter, sizeof(SetNoExternalMeter), sendSequenceNumber++);
                         }
                         break;
-                    case 0x42: // CFG_CME_ADDR_GetMetertype / set meter configuration
-                        logger.printfln("GD internal meter configuration accepted; GD will reboot in five seconds");
+                    case 0x42: // CFG_CME_ADDR_GetMetertype / set external meter configuration
+                        if (len >= 8) {
+                            phase_switch_state.get("gd_meter_mode")->updateUint(PrivCommRxBuffer[12]);
+                            phase_switch_state.get("gd_meter_product")->updateUint(PrivCommRxBuffer[13]);
+                            phase_switch_state.get("gd_configured_max_current_deciamp")->updateUint(
+                                getPrivCommRxBufferUint16(14));
+                        }
+                        phase_switch_state.get("gd_meter_config_pending")->updateBool(false);
+                        phase_switch_state.get("gd_meter_config_error")->updateString("");
+                        logger.printfln("GD external meter configuration accepted: mode %u, product %u, max %.1f A",
+                            phase_switch_state.get("gd_meter_mode")->asUint(),
+                            phase_switch_state.get("gd_meter_product")->asUint(),
+                            phase_switch_state.get("gd_configured_max_current_deciamp")->asUint() / 10.0f);
+                        task_scheduler.scheduleOnce([this](){
+                            sendCommand(GetFaultCode, sizeof(GetFaultCode), sendSequenceNumber++, false);
+                        }, 1000);
                         break;
                     default:
                         logger.printfln("Rx cmd_%.2X seq:%.2X len:%d crc:%.4X -  I don't know what %.2X means.", cmd, seq, len, crc, PrivCommRxBuffer[9]);
@@ -2277,6 +2303,25 @@ void AC011K::register_urls()
     api.addPersistentConfig("evse/phase_switch_config", &phase_switch_config, {}, 1000);
     api.addCommand("evse/phase_switch_update", &phase_switch_update, {}, [this](){
         request_phase_switch(phase_switch_update.get("phases")->asUint());
+    }, false);
+
+    api.addCommand("evse/gd_meter_config_update", &gd_meter_config_update, {}, [this](){
+        if (!gd_meter_config_update.get("restore_no_external_meter")->asBool())
+            return;
+
+        if (firmware_update_running
+            || evse.evse_state.get("iec61851_state")->asUint() != IEC_STATE_A
+            || evse.evse_state.get("charger_state")->asUint() == CHARGER_STATE_CHARGING) {
+            phase_switch_state.get("gd_meter_config_error")->updateString(
+                "Vehicle must be unplugged and charging stopped");
+            logger.printfln("Refusing GD meter configuration while vehicle is connected or update is running");
+            return;
+        }
+
+        phase_switch_state.get("gd_meter_config_pending")->updateBool(true);
+        phase_switch_state.get("gd_meter_config_error")->updateString("");
+        logger.printfln("Applying Sungrow no-external-meter configuration (mode 10, product 0, max 16.0 A)");
+        sendCommand(SetNoExternalMeter, sizeof(SetNoExternalMeter), sendSequenceNumber++);
     }, false);
 
     api.addCommand("evse/reset", Config::Null() , {}, [this](){
