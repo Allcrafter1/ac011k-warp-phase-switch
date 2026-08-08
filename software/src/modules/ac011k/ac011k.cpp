@@ -293,8 +293,6 @@ byte SetSmartparam[]            = {0xAA, 0x18, 0x25, 0x0E, 0x00, 0x05, 0x00, 0x0
 byte SetReset[]                 = {0xAA, 0x18, 0x12, 0x01, 0x00, 3}; // 112 cmdAACtrlSetReset, 3 // this triggers 0x02 SN, Hardware, Version
 byte cantestsetAck[]            = {0xAA, 0x18, 0x2A, 0x00, 0x00}; // cmdAACtrlcantestsetAck test cancom...111
 byte GetRtc[]                   = {0xAA, 0x10, 0x02, 0x00, 0x00};
-// GD 1.7.186: cmdAACtrlGetLoadPhaseAck (target firmware command ID 0x019)
-byte GetLoadPhase[]             = {0xAA, 0x10, 0x19, 0x00, 0x00};
 byte GetFaultCode[]             = {0xAA, 0x10, 0x20, 0x00, 0x00};
 // GD 1.7 command 0x142 stores the external load-balancing sensor type,
 // product/presence flag and the charger maximum current in 0.1 A. Sungrow's
@@ -314,7 +312,7 @@ byte ClearChargingProfile[]     = {0xAA, 0x18, 0x24, 0x05, 0, 0xFF, 0xFF, 0xFF, 
 byte GetMaxCurrLimit[]          = {0xAA, 0x10, 0x0B, 0x00, 0x00};
 
 // ctrl_cmd set start power mode done
-byte Init15[] = {0xAA, 0x18, 0x09, 0x01, 0x00, 0x00};
+byte SetStartPowerMode[] = {0xAA, 0x18, 0x09, 0x01, 0x00, 0x00};
 //W (2021-04-11 18:36:27) [PRIV_COMM, 1764]: Tx(cmd_AA len:15) :  FA 03 00 00 AA 40 05 00 18 09 01 00 00 F9 36
 //W (2021-04-11 18:36:27) [PRIV_COMM, 1919]: Rx(cmd_0A len:15) :  FA 03 00 00 0A 40 05 00 14 09 01 00 00 11 30
 //I (2021-04-11 18:36:27) [PRIV_COMM, 279]: ctrl_cmd set start power mode done -> minpower: 3150080
@@ -696,6 +694,17 @@ void AC011K::sendChargingLimit3(uint8_t currentLimit, byte sendSequenceNumber, u
     sendCommand(ChargingLimit3, sizeof(ChargingLimit3), sendSequenceNumber, false);
 }
 
+void AC011K::send_start_power_mode(uint8_t phases) {
+    // Sungrow's official ESP calls 0 "normal" and 1 "minPower" / "SMALL PWR
+    // START". On AC011E this is the separate control path used before a
+    // low-power start; numberPhases in the OCPP profile alone does not operate
+    // the relays on AC011K-AE-25 V1.7.186.
+    SetStartPowerMode[5] = (phases == 1) ? 1 : 0;
+    logger.printfln("Applying GD start power mode %s for %u phase(s)",
+        SetStartPowerMode[5] ? "minPower" : "normal", phases);
+    sendCommand(SetStartPowerMode, sizeof(SetStartPowerMode), sendSequenceNumber++, false);
+}
+
 bool AC011K::phase_switch_supported() {
     const String &hardware = evse.evse_hardware_configuration.get("Hardware")->asString();
     const String &firmware = evse.evse_hardware_configuration.get("FirmwareVersion")->asString();
@@ -718,13 +727,6 @@ void AC011K::set_phase_switch_error(uint8_t code, const char *text) {
     phase_switch_state.get("last_error_text")->updateString(text);
     logger.printfln("Phase switch error %u: %s", code, text);
     set_phase_switch_stage(PHASE_SWITCH_ERROR);
-}
-
-void AC011K::send_get_load_phase() {
-    if (!phase_switch_supported())
-        return;
-    sendCommand(GetLoadPhase, sizeof(GetLoadPhase), sendSequenceNumber++, false);
-    last_phase_query = millis();
 }
 
 void AC011K::request_phase_switch(uint8_t phases) {
@@ -783,7 +785,7 @@ void AC011K::process_phase_switch() {
     if (phase_switch_stage == PHASE_SWITCH_ERROR) {
         // A fresh valid request can recover without rebooting.
         if (phase_switch_state.get("requested_phases")->asUint()
-            == phase_switch_state.get("active_phases")->asUint()) {
+            == phase_switch_state.get("commanded_phases")->asUint()) {
             set_phase_switch_stage(PHASE_SWITCH_IDLE);
         }
         return;
@@ -791,8 +793,8 @@ void AC011K::process_phase_switch() {
 
     if (phase_switch_stage == PHASE_SWITCH_IDLE) {
         const uint8_t requested = phase_switch_state.get("requested_phases")->asUint();
-        const uint8_t active = phase_switch_state.get("active_phases")->asUint();
-        if ((requested != 1 && requested != 3) || active == 0 || requested == active)
+        const uint8_t commanded = phase_switch_state.get("commanded_phases")->asUint();
+        if ((requested != 1 && requested != 3) || commanded == 0 || requested == commanded)
             return;
 
         const uint32_t minimum_interval_ms =
@@ -806,9 +808,8 @@ void AC011K::process_phase_switch() {
         resume_after_phase_switch =
             evse.evse_state.get("iec61851_state")->asUint() != IEC_STATE_A
             && evse.evse_state.get("allowed_charging_current")->asUint() >= 6000;
-        phase_query_attempts = 0;
         logger.printfln("Starting safe phase switch from %u to %u phase(s); resume=%s",
-            active, phase_switch_target, resume_after_phase_switch ? "true" : "false");
+            commanded, phase_switch_target, resume_after_phase_switch ? "true" : "false");
         bs_evse_stop_charging();
         set_phase_switch_stage(PHASE_SWITCH_STOPPING);
         return;
@@ -850,15 +851,21 @@ void AC011K::process_phase_switch() {
         uint8_t current = evse.evse_state.get("allowed_charging_current")->asUint() / 1000;
         if (current < 6)
             current = 6;
-        logger.printfln("Contactors are load-free; applying %u-phase charging profile", phase_switch_target);
-        sendChargingLimit3(current, sendSequenceNumber++, phase_switch_target);
+        logger.printfln("Contactors are load-free; applying %u-phase start mode", phase_switch_target);
+        send_start_power_mode(phase_switch_target);
         set_phase_switch_stage(PHASE_SWITCH_APPLYING);
         return;
     }
 
     if (phase_switch_stage == PHASE_SWITCH_APPLYING) {
         if (deadline_elapsed(phase_switch_stage_since + 5000))
-            set_phase_switch_error(5, "GD did not acknowledge the requested phase profile");
+            set_phase_switch_error(5, "GD did not acknowledge the requested start power mode");
+        return;
+    }
+
+    if (phase_switch_stage == PHASE_SWITCH_CONFIRMING) {
+        if (deadline_elapsed(phase_switch_stage_since + 5000))
+            set_phase_switch_error(9, "GD did not acknowledge the requested charging profile");
         return;
     }
 
@@ -886,6 +893,37 @@ void AC011K::process_phase_switch() {
         bs_evse_start_charging();
         set_phase_switch_stage(PHASE_SWITCH_RESTARTING);
     }
+}
+
+void AC011K::validate_physical_phase_count() {
+    if (!physical_phase_verification_pending)
+        return;
+
+    uint8_t observed_phases = 0;
+    for (uint8_t i = 0; i < 3; ++i) {
+        // 1 A is well above meter noise and still far below the requested
+        // minimum charging current, so one report is a reliable mismatch.
+        if (last_phase_current_deciamp[i] >= 10)
+            ++observed_phases;
+    }
+    if (observed_phases == 0)
+        return;
+
+    phase_switch_state.get("observed_phases")->updateUint(observed_phases);
+    phase_switch_state.get("active_phases")->updateUint(observed_phases);
+    if (observed_phases == phase_switch_target) {
+        physical_phase_verification_pending = false;
+        phase_switch_state.get("physically_verified")->updateBool(true);
+        logger.printfln("Physical phase mode verified from currents: %u phase(s)", observed_phases);
+        return;
+    }
+
+    physical_phase_verification_pending = false;
+    phase_switch_state.get("physically_verified")->updateBool(false);
+    logger.printfln("Physical phase mismatch: requested %u, measured %u; stopping immediately",
+        phase_switch_target, observed_phases);
+    bs_evse_stop_charging();
+    set_phase_switch_error(8, "Physical phase count differs from requested mode; charging stopped");
 }
 
 
@@ -1177,8 +1215,11 @@ void AC011K::pre_setup() {
     phase_switch_state = Config::Object({
         {"supported", Config::Bool(false)},
         {"requested_phases", Config::Uint8(3)},
+        {"commanded_phases", Config::Uint8(3)},
         {"active_phases", Config::Uint8(0)},
         {"switching", Config::Bool(false)},
+        {"physically_verified", Config::Bool(false)},
+        {"observed_phases", Config::Uint8(0)},
         {"stage", Config::Uint8(PHASE_SWITCH_IDLE)},
         {"last_error", Config::Uint8(0)},
         {"last_error_text", Config::Str("", 0, 96)},
@@ -1236,7 +1277,8 @@ void AC011K::configure_gd() {
     PrivCommTxBuffer[PayloadStart + 5] = 0x00;
     PrivCommSend(0xAA, 6, PrivCommTxBuffer);
 
-    sendCommand(Init15, sizeof(Init15), sendSequenceNumber++, false);
+    SetStartPowerMode[5] = 0;
+    sendCommand(SetStartPowerMode, sizeof(SetStartPowerMode), sendSequenceNumber++, false);
     sendCommand(SetGunTime, sizeof(SetGunTime), sendSequenceNumber++, false);
     sendCommand(ClearChargingProfile, sizeof(ClearChargingProfile), sendSequenceNumber++, false);
     sendCommand(GetMaxCurrLimit, sizeof(GetMaxCurrLimit), sendSequenceNumber++, false);
@@ -1556,9 +1598,11 @@ void AC011K::loop()
                         logger.printfln("EN+ GD EVSE initialized.");
                         phase_switch_state.get("supported")->updateBool(phase_switch_supported());
                         if (phase_switch_supported()) {
-                            // This hardware powers up in its three-phase mode. The GD
-                            // has no GetLoadPhase command; subsequent changes are
-                            // tracked from acknowledged charging profiles.
+                            // This hardware powers up in normal/three-phase mode.
+                            // Acknowledgements are not treated as physical proof;
+                            // current measurements perform that verification.
+                            if (phase_switch_state.get("commanded_phases")->asUint() == 0)
+                                phase_switch_state.get("commanded_phases")->updateUint(3);
                             if (phase_switch_state.get("active_phases")->asUint() == 0)
                                 phase_switch_state.get("active_phases")->updateUint(3);
                             sendCommand(GetFaultCode, sizeof(GetFaultCode), sendSequenceNumber++, false);
@@ -1717,6 +1761,7 @@ void AC011K::loop()
                     last_phase_current_deciamp[1] = getPrivCommRxBufferUint16(108);
                     last_phase_current_deciamp[2] = getPrivCommRxBufferUint16(110);
                     last_phase_current_update = millis();
+                    validate_physical_phase_count();
 
                     // meter power
                     static float prev_energy_rel_raw = 0;
@@ -1885,6 +1930,15 @@ void AC011K::loop()
 //W (2021-04-11 18:36:31) [PRIV_COMM, 1919]: Rx(cmd_0A len:15) :  FA 03 00 00 0A 42 05 00 14 09 01 00 00 90 E9
 //I (2021-04-11 18:36:31) [PRIV_COMM, 279]: ctrl_cmd set start power mode done -> minpower: 15.306.752
                         logger.printfln("Rx cmd_%.2X seq:%.2X len:%d crc:%.4X - ctrl_cmd set start power mode done", cmd, seq, len, crc);
+                        if (phase_switch_stage == PHASE_SWITCH_APPLYING) {
+                            uint8_t current = evse.evse_state.get("allowed_charging_current")->asUint() / 1000;
+                            if (current < 6)
+                                current = 6;
+                            logger.printfln("GD accepted start power mode; applying %u-phase charging profile",
+                                phase_switch_target);
+                            sendChargingLimit3(current, sendSequenceNumber++, phase_switch_target);
+                            set_phase_switch_stage(PHASE_SWITCH_CONFIRMING);
+                        }
                         break;
                     case 0x0B: // GetMaxCurrLimit
                         logger.printfln("GetMaxCurrLimit ack (%d)", getPrivCommRxBufferUint16(12));
@@ -1918,16 +1972,6 @@ void AC011K::loop()
                         break;
                     case 0x3F: // 
                         logger.printfln("Rx cmd_%.2X seq:%.2X len:%d crc:%.4X - cmdAAInit7Ack", cmd, seq, len, crc);
-                        break;
-                    case 0x19: // GD 1.7.186 cmdAACtrlGetLoadPhaseAck
-                        if (len >= 5 && (PrivCommRxBuffer[12] == 1 || PrivCommRxBuffer[12] == 3)) {
-                            const uint8_t phases = PrivCommRxBuffer[12];
-                            phase_switch_state.get("active_phases")->updateUint(phases);
-                            logger.printfln("GD load phase mode: %u phase(s)", phases);
-                        } else {
-                            logger.printfln("Invalid GD load phase reply");
-                            log_hex_privcomm_line(PrivCommRxBuffer);
-                        }
                         break;
                     case 0x20: // cmdAACtrlGetFCode
                         phase_switch_state.get("gd_fault_code")->updateUint(
@@ -2129,9 +2173,14 @@ void AC011K::loop()
             case 0x0D:
                 logger.printfln("Limit ack");
                 log_hex_privcomm_line(PrivCommRxBuffer);
-                if (phase_switch_stage == PHASE_SWITCH_APPLYING) {
-                    phase_switch_state.get("active_phases")->updateUint(phase_switch_target);
-                    logger.printfln("GD acknowledged %u-phase charging profile", phase_switch_target);
+                if (phase_switch_stage == PHASE_SWITCH_CONFIRMING) {
+                    phase_switch_state.get("commanded_phases")->updateUint(phase_switch_target);
+                    phase_switch_state.get("active_phases")->updateUint(0);
+                    phase_switch_state.get("observed_phases")->updateUint(0);
+                    phase_switch_state.get("physically_verified")->updateBool(false);
+                    physical_phase_verification_pending = true;
+                    logger.printfln("GD acknowledged %u-phase charging profile; physical verification pending",
+                        phase_switch_target);
                     finish_phase_switch();
                 }
                 // as of now we set the value when we send the setting to the GD

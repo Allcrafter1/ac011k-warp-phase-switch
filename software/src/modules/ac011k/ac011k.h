@@ -162,13 +162,17 @@ public:
     void sendChargingLimit1(uint8_t currentLimit, byte sendSequenceNumber);
     void sendChargingLimit2(uint8_t currentLimit, byte sendSequenceNumber);
     void sendChargingLimit3(uint8_t currentLimit, byte sendSequenceNumber, uint8_t number_phases = 0);
+    void send_start_power_mode(uint8_t phases);
+    void validate_physical_phase_count();
 
     /*
      * GD 1.7.186 phase switching
      *
-     * The GD controls the contactors. The ESP only sends a charging profile
-     * containing numberPhases after charging has stopped. GD 1.7.186 confirms
-     * accepting that profile with cmd0D; it does not implement GetLoadPhase.
+     * The GD controls the contactors. Sungrow's ESP distinguishes the start
+     * power modes "normal" and "minPower". The mode is applied only while the
+     * contactors are load-free and is followed by the matching OCPP profile.
+     * Neither acknowledgement proves the physical relay state, so it is
+     * verified from the three measured phase currents after charging starts.
      */
     ConfigRoot phase_switch_state;
     ConfigRoot phase_switch_update;
@@ -189,21 +193,19 @@ public:
     bool phase_switch_supported();
     void request_phase_switch(uint8_t phases);
     void process_phase_switch();
-    void send_get_load_phase();
     void set_phase_switch_stage(PhaseSwitchStage stage);
     void set_phase_switch_error(uint8_t code, const char *text);
     void finish_phase_switch();
 
     PhaseSwitchStage phase_switch_stage = PHASE_SWITCH_IDLE;
     uint8_t phase_switch_target = 3;
-    uint8_t phase_query_attempts = 0;
     uint8_t restart_attempts = 0;
     uint16_t last_phase_current_deciamp[3] = {0, 0, 0};
     uint32_t phase_switch_stage_since = 0;
-    uint32_t last_phase_query = 0;
     uint32_t last_phase_current_update = 0;
     uint32_t last_successful_phase_switch = 0;
     bool resume_after_phase_switch = false;
+    bool physical_phase_verification_pending = false;
 
     /* Retry the initial boot-mode request of the GD updater. */
     uint32_t last_gd_boot_request = 0;
