@@ -294,6 +294,7 @@ byte SetReset[]                 = {0xAA, 0x18, 0x12, 0x01, 0x00, 3}; // 112 cmdA
 byte cantestsetAck[]            = {0xAA, 0x18, 0x2A, 0x00, 0x00}; // cmdAACtrlcantestsetAck test cancom...111
 byte GetRtc[]                   = {0xAA, 0x10, 0x02, 0x00, 0x00};
 byte GetFaultCode[]             = {0xAA, 0x10, 0x20, 0x00, 0x00};
+byte GetStartPowerMode[]        = {0xAA, 0x10, 0x09, 0x00, 0x00};
 // GD 1.7 command 0x142 stores the external load-balancing sensor type,
 // product/presence flag and the charger maximum current in 0.1 A. Sungrow's
 // own ESP firmware uses type 10/product 0 when no external CT or smart meter
@@ -701,6 +702,11 @@ void AC011K::send_start_power_mode(uint8_t phases) {
     // helper for protocol diagnostics, but never treat its acknowledgement as
     // proof of a physical phase change.
     SetStartPowerMode[5] = (phases == 1) ? 1 : 0;
+    gd_start_power_get_pending = false;
+    gd_start_power_get_reason = 0;
+    gd_close_marker_query_sent = false;
+    phase_switch_state.get("gd_start_power_mode_raw")->updateUint(0xFF);
+    phase_switch_state.get("gd_phase_hook_seen")->updateBool(false);
     logger.printfln("Applying GD start power mode %s for %u phase(s)",
         SetStartPowerMode[5] ? "minPower" : "normal", phases);
     sendCommand(SetStartPowerMode, sizeof(SetStartPowerMode), sendSequenceNumber++, false);
@@ -779,6 +785,15 @@ void AC011K::finish_phase_switch() {
 void AC011K::process_phase_switch() {
     if (!initialized || firmware_update_running)
         return;
+
+    if (gd_start_power_get_pending
+        && gd_start_power_get_reason == 2
+        && deadline_elapsed(gd_start_power_get_sent_at + 2000)) {
+        gd_start_power_get_pending = false;
+        bs_evse_stop_charging();
+        set_phase_switch_error(10, "GD phase hook marker query timed out; charging stopped");
+        return;
+    }
 
     const bool supported = phase_switch_supported();
     phase_switch_state.get("supported")->updateBool(supported);
@@ -909,6 +924,9 @@ void AC011K::validate_physical_phase_count() {
         if (last_phase_current_deciamp[i] >= 10)
             ++observed_phases;
     }
+    phase_switch_state.get("measured_current_l1_deciamp")->updateUint(last_phase_current_deciamp[0]);
+    phase_switch_state.get("measured_current_l2_deciamp")->updateUint(last_phase_current_deciamp[1]);
+    phase_switch_state.get("measured_current_l3_deciamp")->updateUint(last_phase_current_deciamp[2]);
     if (observed_phases == 0)
         return;
 
@@ -1193,6 +1211,16 @@ void AC011K::update_evseStatus(uint8_t evseStatus) {
             evse.evse_state.get("contactor_state")->updateUint(3); // TF_EVSE_V2_CONTACTOR_STATE_AC1_LIVE_AC2_LIVE
             for (int i = 0; i < 3; ++i)
                 phases_active[i] = phases_connected[i];
+            if (physical_phase_verification_pending
+                && phase_switch_target == 1
+                && !gd_close_marker_query_sent) {
+                gd_close_marker_query_sent = true;
+                gd_start_power_get_pending = true;
+                gd_start_power_get_reason = 2;
+                gd_start_power_get_sent_at = millis();
+                logger.printfln("Charging contactors closed; querying GD phase-hook marker");
+                sendCommand(GetStartPowerMode, sizeof(GetStartPowerMode), sendSequenceNumber++, false);
+            }
             break;
         case 4: // Suspended by charger (started but no power available)
             evse.evse_state.get("iec61851_state")->updateUint(IEC_STATE_B); // Verbunden
@@ -1302,6 +1330,11 @@ void AC011K::pre_setup() {
         {"gd_configured_max_current_deciamp", Config::Uint16(0)},
         {"gd_meter_config_pending", Config::Bool(false)},
         {"gd_meter_config_error", Config::Str("", 0, 96)},
+        {"gd_start_power_mode_raw", Config::Uint8(0xFF)},
+        {"gd_phase_hook_seen", Config::Bool(false)},
+        {"measured_current_l1_deciamp", Config::Uint16(0)},
+        {"measured_current_l2_deciamp", Config::Uint16(0)},
+        {"measured_current_l3_deciamp", Config::Uint16(0)},
     });
     phase_switch_update = Config::Object({
         {"phases", Config::Uint8(3)},
@@ -2011,6 +2044,42 @@ void AC011K::loop()
 //W (2021-04-11 18:36:30) [PRIV_COMM, 1764]: Tx(cmd_AA len:15) :  FA 03 00 00 AA 42 05 00 18 09 01 00 00 78 EF
 //W (2021-04-11 18:36:31) [PRIV_COMM, 1919]: Rx(cmd_0A len:15) :  FA 03 00 00 0A 42 05 00 14 09 01 00 00 90 E9
 //I (2021-04-11 18:36:31) [PRIV_COMM, 279]: ctrl_cmd set start power mode done -> minpower: 15.306.752
+                        if (PrivCommRxBuffer[8] == 0x10 && gd_start_power_get_pending) {
+                            const uint8_t raw_mode = PrivCommRxBuffer[12];
+                            const uint8_t expected_mode = phase_switch_target == 1 ? 1 : 0;
+                            const uint8_t reason = gd_start_power_get_reason;
+                            gd_start_power_get_pending = false;
+                            gd_start_power_get_reason = 0;
+                            phase_switch_state.get("gd_start_power_mode_raw")->updateUint(raw_mode);
+                            phase_switch_state.get("gd_phase_hook_seen")->updateBool((raw_mode & 0x40) != 0);
+                            logger.printfln("GD start power mode readback: 0x%02X (%s)", raw_mode,
+                                reason == 2 ? "after contactor close" : "before charging profile");
+
+                            if ((raw_mode & 0x01) != expected_mode || (raw_mode & 0x20) == 0) {
+                                bs_evse_stop_charging();
+                                set_phase_switch_error(10, "GD v2 mode marker missing or wrong; charging stopped");
+                                break;
+                            }
+                            if (reason == 2) {
+                                if ((raw_mode & 0x40) == 0) {
+                                    bs_evse_stop_charging();
+                                    set_phase_switch_error(10, "GD close hook did not execute; charging stopped");
+                                } else {
+                                    logger.printfln("GD phase close hook execution verified");
+                                }
+                                break;
+                            }
+
+                            uint8_t current = evse.evse_state.get("allowed_charging_current")->asUint() / 1000;
+                            if (current < 6)
+                                current = 6;
+                            logger.printfln("Verified GD v2 start mode; applying %u-phase charging profile",
+                                phase_switch_target);
+                            sendChargingLimit3(current, sendSequenceNumber++, phase_switch_target);
+                            set_phase_switch_stage(PHASE_SWITCH_CONFIRMING);
+                            break;
+                        }
+
                         logger.printfln("Rx cmd_%.2X seq:%.2X len:%d crc:%.4X - ctrl_cmd set start power mode done", cmd, seq, len, crc);
                         if (gd_relay_diagnostic_pending) {
                             gd_relay_diagnostic_pending = false;
@@ -2022,13 +2091,11 @@ void AC011K::loop()
                             sendCommand(SetStartPowerMode, sizeof(SetStartPowerMode), sendSequenceNumber++, false);
                         }
                         if (phase_switch_stage == PHASE_SWITCH_APPLYING) {
-                            uint8_t current = evse.evse_state.get("allowed_charging_current")->asUint() / 1000;
-                            if (current < 6)
-                                current = 6;
-                            logger.printfln("GD accepted start power mode; applying %u-phase charging profile",
-                                phase_switch_target);
-                            sendChargingLimit3(current, sendSequenceNumber++, phase_switch_target);
-                            set_phase_switch_stage(PHASE_SWITCH_CONFIRMING);
+                            gd_start_power_get_pending = true;
+                            gd_start_power_get_reason = 1;
+                            gd_start_power_get_sent_at = millis();
+                            logger.printfln("GD accepted start power mode; reading it back before charging");
+                            sendCommand(GetStartPowerMode, sizeof(GetStartPowerMode), sendSequenceNumber++, false);
                         }
                         break;
                     case 0x0B: // GetMaxCurrLimit

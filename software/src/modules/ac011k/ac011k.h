@@ -169,9 +169,11 @@ public:
      * Experimental phase-switch diagnostics.
      *
      * The stock GD 1.7.186 only stores numberPhases/start-power-mode. This
-     * branch is paired with the verified 2021-V1 GD patch that maps PB3 to the
-     * common relay feed and PA8/PC6/PB9 to N+L1/L2/L3. Compatibility remains
-     * deliberately restricted to the exact AC011K-AE-25 1.7.186 identity.
+     * branch is paired with a locally instrumented 2021-V1 GD patch.  The v2
+     * handshake proves that the requested mode survived and that the intended
+     * close hook executed before WARP accepts a physical phase measurement.
+     * Compatibility remains restricted to the exact AC011K-AE-25 1.7.186
+     * identity; the GPIO-to-coil mapping is not considered proven yet.
      */
     ConfigRoot phase_switch_state;
     ConfigRoot phase_switch_update;
@@ -209,6 +211,10 @@ public:
     uint32_t last_successful_phase_switch = 0;
     bool resume_after_phase_switch = false;
     bool physical_phase_verification_pending = false;
+    bool gd_start_power_get_pending = false;
+    uint8_t gd_start_power_get_reason = 0;
+    bool gd_close_marker_query_sent = false;
+    uint32_t gd_start_power_get_sent_at = 0;
     bool gd_relay_diagnostic_pending = false;
     uint32_t gd_relay_diagnostic_sent_at = 0;
 
