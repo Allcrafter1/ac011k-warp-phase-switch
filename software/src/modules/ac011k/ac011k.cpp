@@ -705,6 +705,9 @@ void AC011K::send_start_power_mode(uint8_t phases) {
     gd_start_power_get_pending = false;
     gd_start_power_get_reason = 0;
     gd_close_marker_query_sent = false;
+    gd_close_marker_verified = false;
+    gd_close_marker_query_started_at = 0;
+    gd_close_marker_last_query_at = 0;
     phase_switch_state.get("gd_start_power_mode_raw")->updateUint(0xFF);
     phase_switch_state.get("gd_phase_hook_seen")->updateBool(false);
     logger.printfln("Applying GD start power mode %s for %u phase(s)",
@@ -732,6 +735,7 @@ void AC011K::set_phase_switch_stage(PhaseSwitchStage stage) {
 }
 
 void AC011K::set_phase_switch_error(uint8_t code, const char *text) {
+    physical_phase_verification_pending = false;
     phase_switch_state.get("last_error")->updateUint(code);
     phase_switch_state.get("last_error_text")->updateString(text);
     logger.printfln("Phase switch error %u: %s", code, text);
@@ -788,11 +792,30 @@ void AC011K::process_phase_switch() {
 
     if (gd_start_power_get_pending
         && gd_start_power_get_reason == 2
-        && deadline_elapsed(gd_start_power_get_sent_at + 2000)) {
+        && deadline_elapsed(gd_start_power_get_sent_at + 1000)) {
         gd_start_power_get_pending = false;
-        bs_evse_stop_charging();
-        set_phase_switch_error(10, "GD phase hook marker query timed out; charging stopped");
-        return;
+        gd_start_power_get_reason = 0;
+        logger.printfln("GD phase-hook marker query timed out; retrying within guard window");
+    }
+
+    if (gd_close_marker_query_sent
+        && physical_phase_verification_pending
+        && !gd_close_marker_verified) {
+        if (deadline_elapsed(gd_close_marker_query_started_at + 5000)) {
+            bs_evse_stop_charging();
+            set_phase_switch_error(10, "GD final phase hook did not execute within 5 seconds; charging stopped");
+            return;
+        }
+
+        if (!gd_start_power_get_pending
+            && (gd_close_marker_last_query_at == 0
+                || deadline_elapsed(gd_close_marker_last_query_at + 250))) {
+            gd_start_power_get_pending = true;
+            gd_start_power_get_reason = 2;
+            gd_start_power_get_sent_at = millis();
+            gd_close_marker_last_query_at = millis();
+            sendCommand(GetStartPowerMode, sizeof(GetStartPowerMode), sendSequenceNumber++, false);
+        }
     }
 
     const bool supported = phase_switch_supported();
@@ -915,6 +938,12 @@ void AC011K::process_phase_switch() {
 
 void AC011K::validate_physical_phase_count() {
     if (!physical_phase_verification_pending)
+        return;
+
+    // GD reports state 3 before its staged relay state machine reaches the
+    // final close block.  Never accept current measurements for one-phase
+    // operation until the patched final hook has proven its execution.
+    if (phase_switch_target == 1 && !gd_close_marker_verified)
         return;
 
     uint8_t observed_phases = 0;
@@ -1215,11 +1244,9 @@ void AC011K::update_evseStatus(uint8_t evseStatus) {
                 && phase_switch_target == 1
                 && !gd_close_marker_query_sent) {
                 gd_close_marker_query_sent = true;
-                gd_start_power_get_pending = true;
-                gd_start_power_get_reason = 2;
-                gd_start_power_get_sent_at = millis();
-                logger.printfln("Charging contactors closed; querying GD phase-hook marker");
-                sendCommand(GetStartPowerMode, sizeof(GetStartPowerMode), sendSequenceNumber++, false);
+                gd_close_marker_query_started_at = millis();
+                gd_close_marker_last_query_at = 0;
+                logger.printfln("GD reports charging; polling staged final phase-hook marker");
             }
             break;
         case 4: // Suspended by charger (started but no power available)
@@ -2062,9 +2089,10 @@ void AC011K::loop()
                             }
                             if (reason == 2) {
                                 if ((raw_mode & 0x40) == 0) {
-                                    bs_evse_stop_charging();
-                                    set_phase_switch_error(10, "GD close hook did not execute; charging stopped");
+                                    logger.printfln("GD final phase hook not reached yet (raw 0x%02X); retrying",
+                                        raw_mode);
                                 } else {
+                                    gd_close_marker_verified = true;
                                     logger.printfln("GD phase close hook execution verified");
                                 }
                                 break;

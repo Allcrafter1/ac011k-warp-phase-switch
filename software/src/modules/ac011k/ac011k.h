@@ -214,6 +214,9 @@ public:
     bool gd_start_power_get_pending = false;
     uint8_t gd_start_power_get_reason = 0;
     bool gd_close_marker_query_sent = false;
+    bool gd_close_marker_verified = false;
+    uint32_t gd_close_marker_query_started_at = 0;
+    uint32_t gd_close_marker_last_query_at = 0;
     uint32_t gd_start_power_get_sent_at = 0;
     bool gd_relay_diagnostic_pending = false;
     uint32_t gd_relay_diagnostic_sent_at = 0;
