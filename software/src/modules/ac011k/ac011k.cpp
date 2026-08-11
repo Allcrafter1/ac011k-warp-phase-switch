@@ -790,6 +790,25 @@ void AC011K::process_phase_switch() {
     if (!initialized || firmware_update_running)
         return;
 
+    // Never send phase-mode, profile, restart, or marker-query commands while
+    // the GD reports an unavailable/fault state.  In particular, GD state 9
+    // includes safety faults such as the PE/GND self-test.  The GD already
+    // opens the contactors; this guard only aborts our phase-switch state
+    // machine and deliberately does not attempt to clear or mask the fault.
+    const uint8_t gd_state = evse.evse_state.get("GD_state")->asUint();
+    if (gd_state >= 7
+        || evse.evse_state.get("charger_state")->asUint() == CHARGER_STATE_ERROR) {
+        gd_start_power_get_pending = false;
+        gd_start_power_get_reason = 0;
+        gd_close_marker_query_sent = false;
+        physical_phase_verification_pending = false;
+        if (phase_switch_stage != PHASE_SWITCH_IDLE
+            && phase_switch_stage != PHASE_SWITCH_ERROR) {
+            set_phase_switch_error(11, "GD fault/unavailable state aborted phase switching");
+        }
+        return;
+    }
+
     if (gd_start_power_get_pending
         && gd_start_power_get_reason == 2
         && deadline_elapsed(gd_start_power_get_sent_at + 1000)) {
