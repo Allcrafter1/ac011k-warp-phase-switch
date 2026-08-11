@@ -168,10 +168,10 @@ public:
     /*
      * Experimental phase-switch diagnostics.
      *
-     * GD 1.7.186 acknowledges numberPhases and its start-power-mode byte, but
-     * the legacy AC011K-AE-25 did not physically switch during the guarded
-     * live test. phase_switch_supported() therefore remains fail-closed until
-     * an independently controllable contactor path is proven on the PCB.
+     * The stock GD 1.7.186 only stores numberPhases/start-power-mode. This
+     * branch is paired with the verified 2021-V1 GD patch that maps PB3 to the
+     * common relay feed and PA8/PC6/PB9 to N+L1/L2/L3. Compatibility remains
+     * deliberately restricted to the exact AC011K-AE-25 1.7.186 identity.
      */
     ConfigRoot phase_switch_state;
     ConfigRoot phase_switch_update;

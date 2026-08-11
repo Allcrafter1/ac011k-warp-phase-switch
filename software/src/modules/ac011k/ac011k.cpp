@@ -707,17 +707,14 @@ void AC011K::send_start_power_mode(uint8_t phases) {
 }
 
 bool AC011K::phase_switch_supported() {
-    // Fail closed. On the legacy AC011K-AE-25, GD 1.7.186 acknowledges both
-    // OCPP numberPhases and start-power-mode values without changing the
-    // physical contactors. A live current measurement confirmed three active
-    // phases after requesting one. The newer AC011E-01 advertised by Sungrow
-    // uses a different hardware control path, even though its package can
-    // contain a GD image with the same AC011K-AE-25 name.
-    //
-    // Re-enable this only after the PCB revision and an independently
-    // controllable N/L1 versus L2/L3 contactor path have been verified without
-    // a vehicle connected.
-    return false;
+    // This build is paired exclusively with the locally verified 1.7.186 GD
+    // patch for the 2021 AC011K-AE-25 V1 board. Do not broaden this predicate:
+    // an unpatched 1.7.186 acknowledges the same protocol values but keeps all
+    // three phases active, and other revisions have different relay topology.
+    return initialized
+        && evse.evse_hardware_configuration.get("Hardware")->asString().compareTo("AC011K-AE-25") == 0
+        && evse.evse_hardware_configuration.get("FirmwareVersion")->asString().compareTo("1.7.186") == 0
+        && evse.evse_hardware_configuration.get("GDFirmwareVersion")->asUint() == 186;
 }
 
 void AC011K::set_phase_switch_stage(PhaseSwitchStage stage) {
@@ -864,13 +861,13 @@ void AC011K::process_phase_switch() {
     }
 
     if (phase_switch_stage == PHASE_SWITCH_APPLYING) {
-        if (deadline_elapsed(phase_switch_stage_since + 5000))
+        if (deadline_elapsed(phase_switch_stage_since + 20000))
             set_phase_switch_error(5, "GD did not acknowledge the requested start power mode");
         return;
     }
 
     if (phase_switch_stage == PHASE_SWITCH_CONFIRMING) {
-        if (deadline_elapsed(phase_switch_stage_since + 5000))
+        if (deadline_elapsed(phase_switch_stage_since + 20000))
             set_phase_switch_error(9, "GD did not acknowledge the requested charging profile");
         return;
     }
@@ -986,7 +983,11 @@ void AC011K::process_gd_relay_diagnostic() {
         && evse.evse_hardware_configuration.get("GDFirmwareVersion")->asUint() == 186);
     if (!gd_relay_diagnostic_pending)
         return;
-    if (deadline_elapsed(gd_relay_diagnostic_sent_at + 5000)) {
+    // Normal GD traffic can defer an otherwise valid command until the next
+    // roughly ten-second reporting window. Keep this above that observed
+    // worst case; the GD patch itself opens autonomously and does not depend
+    // on this acknowledgement timeout.
+    if (deadline_elapsed(gd_relay_diagnostic_sent_at + 20000)) {
         gd_relay_diagnostic_pending = false;
         gd_relay_diagnostic_state.get("running")->updateBool(false);
         gd_relay_diagnostic_state.get("last_error")->updateString("GD did not acknowledge diagnostic command");
