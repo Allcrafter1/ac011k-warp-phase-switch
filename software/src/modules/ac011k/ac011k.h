@@ -177,6 +177,8 @@ public:
     ConfigRoot phase_switch_update;
     ConfigRoot phase_switch_config;
     ConfigRoot gd_meter_config_update;
+    ConfigRoot gd_relay_diagnostic_state;
+    ConfigRoot gd_relay_diagnostic_update;
 
     enum PhaseSwitchStage : uint8_t {
         PHASE_SWITCH_IDLE = 0,
@@ -195,6 +197,8 @@ public:
     void set_phase_switch_stage(PhaseSwitchStage stage);
     void set_phase_switch_error(uint8_t code, const char *text);
     void finish_phase_switch();
+    void request_gd_relay_diagnostic(uint8_t group);
+    void process_gd_relay_diagnostic();
 
     PhaseSwitchStage phase_switch_stage = PHASE_SWITCH_IDLE;
     uint8_t phase_switch_target = 3;
@@ -205,6 +209,8 @@ public:
     uint32_t last_successful_phase_switch = 0;
     bool resume_after_phase_switch = false;
     bool physical_phase_verification_pending = false;
+    bool gd_relay_diagnostic_pending = false;
+    uint32_t gd_relay_diagnostic_sent_at = 0;
 
     /* Retry the initial boot-mode request of the GD updater. */
     uint32_t last_gd_boot_request = 0;

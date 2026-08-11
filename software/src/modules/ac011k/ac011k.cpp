@@ -932,6 +932,70 @@ void AC011K::validate_physical_phase_count() {
     set_phase_switch_error(8, "Physical phase count differs from requested mode; charging stopped");
 }
 
+void AC011K::request_gd_relay_diagnostic(uint8_t group) {
+    gd_relay_diagnostic_state.get("last_acknowledged")->updateBool(false);
+    gd_relay_diagnostic_state.get("last_error")->updateString("");
+
+    if (group < 1 || group > 3) {
+        gd_relay_diagnostic_state.get("last_error")->updateString("group must be 1, 2 or 3");
+        return;
+    }
+    if (!initialized
+        || evse.evse_hardware_configuration.get("GDFirmwareVersion")->asUint() != 186) {
+        gd_relay_diagnostic_state.get("last_error")->updateString("requires GD 1.7.186 diagnostic firmware");
+        return;
+    }
+    if (firmware_update_running || gd_relay_diagnostic_pending) {
+        gd_relay_diagnostic_state.get("last_error")->updateString("firmware update or diagnostic already running");
+        return;
+    }
+
+    const bool vehicle_unplugged =
+        evse.evse_state.get("iec61851_state")->asUint() == IEC_STATE_A
+        && evse.evse_state.get("charger_state")->asUint() == CHARGER_STATE_NOT_PLUGGED_IN;
+    const bool contactors_open = evse.evse_state.get("contactor_state")->asUint() == 1;
+    const bool no_current_allowed =
+        evse.evse_state.get("allowed_charging_current")->asUint() == 0;
+    const bool no_measured_current =
+        last_phase_current_deciamp[0] <= 5
+        && last_phase_current_deciamp[1] <= 5
+        && last_phase_current_deciamp[2] <= 5;
+    if (!vehicle_unplugged || !contactors_open || !no_current_allowed || !no_measured_current) {
+        gd_relay_diagnostic_state.get("last_error")->updateString(
+            "refused: vehicle must be unplugged, contactors open and all currents zero");
+        logger.printfln("Refusing GD relay diagnostic: unsafe EVSE state");
+        return;
+    }
+
+    // The patched 1.7.186 handler reserves A1/A2/A3 for 750 ms pulses of
+    // N+L1, L2 and L3 respectively. It clears the selector before closing,
+    // verifies all GPIOs are open, and always opens PB3 first afterwards.
+    SetStartPowerMode[5] = 0xA0 + group;
+    gd_relay_diagnostic_pending = true;
+    gd_relay_diagnostic_sent_at = millis();
+    gd_relay_diagnostic_state.get("running")->updateBool(true);
+    gd_relay_diagnostic_state.get("last_group")->updateUint(group);
+    logger.printfln("Starting fail-closed GD relay diagnostic for group %u", group);
+    sendCommand(SetStartPowerMode, sizeof(SetStartPowerMode), sendSequenceNumber++, false);
+    SetStartPowerMode[5] = 0;
+}
+
+void AC011K::process_gd_relay_diagnostic() {
+    gd_relay_diagnostic_state.get("available")->updateBool(
+        initialized
+        && evse.evse_hardware_configuration.get("GDFirmwareVersion")->asUint() == 186);
+    if (!gd_relay_diagnostic_pending)
+        return;
+    if (deadline_elapsed(gd_relay_diagnostic_sent_at + 5000)) {
+        gd_relay_diagnostic_pending = false;
+        gd_relay_diagnostic_state.get("running")->updateBool(false);
+        gd_relay_diagnostic_state.get("last_error")->updateString("GD did not acknowledge diagnostic command");
+        logger.printfln("GD relay diagnostic timed out");
+        SetStartPowerMode[5] = 0;
+        sendCommand(SetStartPowerMode, sizeof(SetStartPowerMode), sendSequenceNumber++, false);
+    }
+}
+
 
 int AC011K::bs_evse_start_charging() {
     uint8_t allowed_charging_current = uint8_t(evse.evse_state.get("allowed_charging_current")->asUint()/1000);
@@ -1202,6 +1266,7 @@ void AC011K::flashChunk(uint8_t *data, uint32_t chunk_index, size_t chunk_length
 void AC011K::update_all_data() {
     evse.update_all_data();
     evse_slot_machine();
+    process_gd_relay_diagnostic();
     process_phase_switch();
 }
 
@@ -1242,6 +1307,16 @@ void AC011K::pre_setup() {
     });
     gd_meter_config_update = Config::Object({
         {"restore_no_external_meter", Config::Bool(false)},
+    });
+    gd_relay_diagnostic_state = Config::Object({
+        {"available", Config::Bool(false)},
+        {"running", Config::Bool(false)},
+        {"last_group", Config::Uint8(0)},
+        {"last_acknowledged", Config::Bool(false)},
+        {"last_error", Config::Str("", 0, 112)},
+    });
+    gd_relay_diagnostic_update = Config::Object({
+        {"group", Config::Uint8(0)},
     });
     phase_switch_config = ConfigRoot(Config::Object({
         {"default_phases", Config::Uint8(3)},
@@ -1936,6 +2011,15 @@ void AC011K::loop()
 //W (2021-04-11 18:36:31) [PRIV_COMM, 1919]: Rx(cmd_0A len:15) :  FA 03 00 00 0A 42 05 00 14 09 01 00 00 90 E9
 //I (2021-04-11 18:36:31) [PRIV_COMM, 279]: ctrl_cmd set start power mode done -> minpower: 15.306.752
                         logger.printfln("Rx cmd_%.2X seq:%.2X len:%d crc:%.4X - ctrl_cmd set start power mode done", cmd, seq, len, crc);
+                        if (gd_relay_diagnostic_pending) {
+                            gd_relay_diagnostic_pending = false;
+                            gd_relay_diagnostic_state.get("running")->updateBool(false);
+                            gd_relay_diagnostic_state.get("last_acknowledged")->updateBool(true);
+                            gd_relay_diagnostic_state.get("last_error")->updateString("");
+                            logger.printfln("GD relay diagnostic completed and returned to open state");
+                            SetStartPowerMode[5] = 0;
+                            sendCommand(SetStartPowerMode, sizeof(SetStartPowerMode), sendSequenceNumber++, false);
+                        }
                         if (phase_switch_stage == PHASE_SWITCH_APPLYING) {
                             uint8_t current = evse.evse_state.get("allowed_charging_current")->asUint() / 1000;
                             if (current < 6)
@@ -2355,9 +2439,14 @@ void AC011K::register_urls()
     evse.register_urls();
 
     api.addState("evse/phase_switch", &phase_switch_state, {}, 1000);
+    api.addState("evse/gd_relay_diagnostic", &gd_relay_diagnostic_state, {}, 250);
     api.addPersistentConfig("evse/phase_switch_config", &phase_switch_config, {}, 1000);
     api.addCommand("evse/phase_switch_update", &phase_switch_update, {}, [this](){
         request_phase_switch(phase_switch_update.get("phases")->asUint());
+    }, false);
+
+    api.addCommand("evse/gd_relay_diagnostic_update", &gd_relay_diagnostic_update, {}, [this](){
+        request_gd_relay_diagnostic(gd_relay_diagnostic_update.get("group")->asUint());
     }, false);
 
     api.addCommand("evse/gd_meter_config_update", &gd_meter_config_update, {}, [this](){
