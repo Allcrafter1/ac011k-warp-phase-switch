@@ -1104,6 +1104,11 @@ void AC011K::process_phase_switch() {
                 : evse.evse_state.get("allowed_charging_current")->asUint() >= 6000);
         logger.printfln("Starting safe phase switch from %u to %u phase(s); resume=%s",
             commanded, phase_switch_target, resume_after_phase_switch ? "true" : "false");
+        // The public IEC state is synthesized from the GD charging state and
+        // does not prove that the EV physically released state C. Require a
+        // fresh raw CP sample in state B before changing the relay mode.
+        phase_switch_cp_safe = false;
+        phase_switch_state.get("cp_safe_for_switch")->updateBool(false);
         bs_evse_stop_charging();
         set_phase_switch_stage(PHASE_SWITCH_STOPPING);
         if (power_target_control_active) {
@@ -1119,21 +1124,30 @@ void AC011K::process_phase_switch() {
     }
 
     if (phase_switch_stage == PHASE_SWITCH_STOPPING) {
-        const bool stopped =
+        const bool logically_stopped =
             evse.evse_state.get("iec61851_state")->asUint() != IEC_STATE_C
             && evse.evse_state.get("charger_state")->asUint() != CHARGER_STATE_CHARGING;
-        if (stopped) {
+        const bool unplugged =
+            evse.evse_state.get("iec61851_state")->asUint() == IEC_STATE_A;
+        if (logically_stopped && (unplugged || phase_switch_cp_safe)) {
             set_phase_switch_stage(PHASE_SWITCH_OFF_DELAY);
             return;
         }
         if (deadline_elapsed(phase_switch_stage_since + 30000)) {
-            set_phase_switch_error(4, "Charging did not stop within 30 seconds");
+            set_phase_switch_error(4, "EV did not confirm raw CP state B within 30 seconds");
         }
         return;
     }
 
     if (phase_switch_stage == PHASE_SWITCH_OFF_DELAY) {
         if (evse.evse_state.get("iec61851_state")->asUint() == IEC_STATE_C) {
+            bs_evse_stop_charging();
+            set_phase_switch_stage(PHASE_SWITCH_STOPPING);
+            return;
+        }
+
+        if (evse.evse_state.get("iec61851_state")->asUint() != IEC_STATE_A
+            && !phase_switch_cp_safe) {
             bs_evse_stop_charging();
             set_phase_switch_stage(PHASE_SWITCH_STOPPING);
             return;
@@ -1636,6 +1650,8 @@ void AC011K::pre_setup() {
         {"measured_current_l1_deciamp", Config::Uint16(0)},
         {"measured_current_l2_deciamp", Config::Uint16(0)},
         {"measured_current_l3_deciamp", Config::Uint16(0)},
+        {"cp_voltage_raw", Config::Uint16(0)},
+        {"cp_safe_for_switch", Config::Bool(false)},
     });
     phase_switch_update = Config::Object({
         {"phases", Config::Uint8(3)},
@@ -2694,7 +2710,8 @@ void AC011K::loop()
                 // evse_state.get("allowed_charging_current")->updateUint(allowed_charging_current);
                 break;
 
-            case 0x0E: // ChargingParameterRpt
+            case 0x0E: { // ChargingParameterRpt
+                const uint16_t cp_voltage_raw = getPrivCommRxBufferUint16(19);
                 if(ac011k_hardware.config.get("verbose_communication")->asBool() 
                     // report on changes
                     || (evse.evse_low_level_state.get("cp_pwm_duty_cycle")->asUint() != getPrivCommRxBufferUint16(17)) //duty
@@ -2702,7 +2719,7 @@ void AC011K::loop()
                   ) { 
                     logger.printfln("Charging parameter report - duty:%d cpVolt:%d power factors:%d/%d/%d %d offset0:%d offset1:%d leakcurr:%d AMBTemp:%d lock:%d",
                         getPrivCommRxBufferUint16(17), // duty
-                        getPrivCommRxBufferUint16(19), // cpVolt
+                        cp_voltage_raw, // cpVolt
                         getPrivCommRxBufferUint16(9),  // power factor 1
                         getPrivCommRxBufferUint16(11), // power factor 2
                         getPrivCommRxBufferUint16(13), // power factor 3
@@ -2714,13 +2731,23 @@ void AC011K::loop()
                         PrivCommRxBuffer[63]);         // lock
                 }
                 evse.evse_low_level_state.get("cp_pwm_duty_cycle")->updateUint(getPrivCommRxBufferUint16(17)); //duty
-                evse.evse_low_level_state.get("adc_values")->get(6)->updateUint(getPrivCommRxBufferUint16(19)); //cpVolt
+                evse.evse_low_level_state.get("adc_values")->get(6)->updateUint(cp_voltage_raw); //cpVolt
+                phase_switch_state.get("cp_voltage_raw")->updateUint(cp_voltage_raw);
+                if (phase_switch_stage == PHASE_SWITCH_STOPPING
+                    || phase_switch_stage == PHASE_SWITCH_OFF_DELAY) {
+                    // AC011K reports CP in centivolts: B is about 900, C about
+                    // 600 on the live test hardware. Only a sample received
+                    // after the stop request can release the phase switch.
+                    phase_switch_cp_safe = cp_voltage_raw >= 800;
+                    phase_switch_state.get("cp_safe_for_switch")->updateBool(
+                        phase_switch_cp_safe);
+                }
 #ifdef EXPERIMENTAL
 // experimental:
                 send_http(String(",\"type\":\"en+0E\",\"data\":{")
                     +"\"transaction\":"+String(transactionNumber)
                     +",\"duty\":"+String(getPrivCommRxBufferUint16(17))
-                    +",\"cpVolt\":"+String(getPrivCommRxBufferUint16(19))
+                    +",\"cpVolt\":"+String(cp_voltage_raw)
                     +",\"pf1\":"+String(getPrivCommRxBufferUint16(9))   // power factor 1
                     +",\"pf2\":"+String(getPrivCommRxBufferUint16(11))  // power factor 2
                     +",\"pf3\":"+String(getPrivCommRxBufferUint16(13))  // power factor 3
@@ -2735,6 +2762,7 @@ void AC011K::loop()
 // end experimental
 #endif
                 break;
+            }
 
             case 0x0F:
                 logger.printfln("Rx cmd_%.2X seq:%.2X len:%d crc:%.4X - Charging limit request, answer: %dA", cmd, seq, len, crc, allowed_charging_current);

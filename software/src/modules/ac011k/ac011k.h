@@ -225,6 +225,7 @@ public:
     uint32_t phase_switch_stage_since = 0;
     uint32_t last_phase_current_update = 0;
     uint32_t last_successful_phase_switch = 0;
+    bool phase_switch_cp_safe = false;
     bool resume_after_phase_switch = false;
     bool power_target_control_active = false;
     bool power_target_dirty = false;
