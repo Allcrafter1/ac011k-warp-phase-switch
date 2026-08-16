@@ -1,0 +1,26 @@
+purpose=selectable live-verified 1p/stock 3p experiment; not production firmware
+base=AC011K-AE-25_V1.2.460.bin
+base_sha256=181e1ba228848a778d9e5639b8732bf14659ef7e52577ce74fcecdd15fa72909
+patched_sha256=38a7c6364d7940d274ca2c8712cd38465f518fa4ebddb9575df75fd2b37f4f9b
+image_size=262144
+bootloader_0x08000000_0x08007fff=byte-identical
+start_power_mode_ram=0x2000402e
+mode_0=stock_three_phase_gpio_effects
+mode_1=live_verified_PB3_only_one_phase_gpio_effects
+mode_handler_marker=0x20
+physical_close_marker=0x40
+complete_stop_open_path=byte-identical
+PB3_stop_open_reset_0x0801f424=byte-identical
+all_changed_bytes=confined_to_declared_hooks_and_zero_filled_code_cave
+mode_handler_size=24
+conditional_set_size=24
+conditional_hold_size=28
+0x08029232 mode_handler old=0120bde8 new=0ef065bc target=0x08037b00
+0x0801f180 PA8_set_mode1 old=eaf745f8 new=18f0defc target=0x08037b40
+0x0801f214 PC6_set_mode2 old=e9f7fbff new=18f094fc target=0x08037b40
+0x0801f26a PB9_set_mode2 old=e9f7d0ff new=18f069fc target=0x08037b40
+0x0801f274 PA8_set_mode2 old=e9f7cbff new=18f064fc target=0x08037b40
+0x0801f2e0 PB9_set_mode3 old=e9f795ff new=18f02efc target=0x08037b40
+0x0801f334 PC6_set_mode3 old=e9f76bff new=18f004fc target=0x08037b40
+0x0801f33e PA8_set_mode3 old=e9f766ff new=18f0fffb target=0x08037b40
+0x0801f3b8 PB3_final_close old=e9f72bff new=18f0dafb target=0x08037b70
