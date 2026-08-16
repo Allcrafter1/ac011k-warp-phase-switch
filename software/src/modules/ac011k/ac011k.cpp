@@ -819,6 +819,14 @@ void AC011K::process_phase_switch() {
         logger.printfln("GD phase-hook marker query timed out; retrying within guard window");
     }
 
+    if (gd_start_power_get_pending
+        && gd_start_power_get_reason == 1
+        && deadline_elapsed(gd_start_power_get_sent_at + 1000)) {
+        gd_start_power_get_sent_at = millis();
+        logger.printfln("GD start-mode readback timed out; retrying");
+        sendCommand(GetStartPowerMode, sizeof(GetStartPowerMode), sendSequenceNumber++, false);
+    }
+
     if (gd_close_marker_query_sent
         && physical_phase_verification_pending
         && !gd_close_marker_verified) {
@@ -2142,9 +2150,13 @@ void AC011K::loop()
                         if (phase_switch_stage == PHASE_SWITCH_APPLYING) {
                             gd_start_power_get_pending = true;
                             gd_start_power_get_reason = 1;
-                            gd_start_power_get_sent_at = millis();
-                            logger.printfln("GD accepted start power mode; reading it back before charging");
-                            sendCommand(GetStartPowerMode, sizeof(GetStartPowerMode), sendSequenceNumber++, false);
+                            gd_start_power_get_sent_at = millis() + 100;
+                            logger.printfln("GD accepted start power mode; scheduling readback before charging");
+                            // Do not transmit from inside the PrivComm receive
+                            // handler: later processing of the current frame can
+                            // reuse the shared Tx buffer. The phase-switch loop
+                            // sends (and, if needed, retries) the getter once
+                            // this short guard interval has elapsed.
                         }
                         break;
                     case 0x0B: // GetMaxCurrLimit
