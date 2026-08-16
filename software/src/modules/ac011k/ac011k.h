@@ -168,12 +168,12 @@ public:
     /*
      * Experimental phase-switch diagnostics.
      *
-     * The stock GD 1.7.186 only stores numberPhases/start-power-mode. This
-     * branch is paired with a locally instrumented 2021-V1 GD patch.  The v2
-     * handshake proves that the requested mode survived and that the intended
-     * close hook executed before WARP accepts a physical phase measurement.
-     * Compatibility remains restricted to the exact AC011K-AE-25 1.7.186
-     * identity; the GPIO-to-coil mapping is not considered proven yet.
+     * The stock GD 1.2.460 only stores numberPhases/start-power-mode. This
+     * branch is paired with the live-tested selectable patch for the 2021-V1
+     * AC011K-AE-25. The handshake proves that the requested mode survived and
+     * that the patched final close hook executed before WARP accepts a
+     * physical phase measurement. Compatibility remains restricted to the
+     * exact AC011K-AE-25 1.2.460 identity and this paired GD image.
      */
     ConfigRoot phase_switch_state;
     ConfigRoot phase_switch_update;

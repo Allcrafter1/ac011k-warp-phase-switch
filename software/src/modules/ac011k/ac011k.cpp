@@ -697,10 +697,11 @@ void AC011K::sendChargingLimit3(uint8_t currentLimit, byte sendSequenceNumber, u
 
 void AC011K::send_start_power_mode(uint8_t phases) {
     // Command 0x109 stores Sungrow's "normal" / "minPower" start preference.
-    // Reverse engineering of AC011K-AE-25 V1.7.186 shows that the GD only
-    // stores and returns this byte; relayControl_11KW never reads it. Keep the
-    // helper for protocol diagnostics, but never treat its acknowledgement as
-    // proof of a physical phase change.
+    // The paired 1.2.460 GD patch consumes bit 0 in its already live-tested
+    // relay path: zero preserves the stock three-phase writes and one selects
+    // the N+L1-only sequence. Readback markers prove both handler execution
+    // and arrival at the final close hook; acknowledgement alone is not
+    // accepted as proof of a physical phase change.
     SetStartPowerMode[5] = (phases == 1) ? 1 : 0;
     gd_start_power_get_pending = false;
     gd_start_power_get_reason = 0;
@@ -716,14 +717,15 @@ void AC011K::send_start_power_mode(uint8_t phases) {
 }
 
 bool AC011K::phase_switch_supported() {
-    // This build is paired exclusively with the locally verified 1.7.186 GD
-    // patch for the 2021 AC011K-AE-25 V1 board. Do not broaden this predicate:
-    // an unpatched 1.7.186 acknowledges the same protocol values but keeps all
-    // three phases active, and other revisions have different relay topology.
+    // This build is paired exclusively with the selectable 1.2.460 GD patch
+    // for the live-tested 2021 AC011K-AE-25 V1 board. Do not broaden this
+    // predicate: an unpatched 1.2.460 acknowledges the same protocol values
+    // but keeps all three phases active, and other revisions can have a
+    // different relay topology or RAM layout.
     return initialized
         && evse.evse_hardware_configuration.get("Hardware")->asString().compareTo("AC011K-AE-25") == 0
-        && evse.evse_hardware_configuration.get("FirmwareVersion")->asString().compareTo("1.7.186") == 0
-        && evse.evse_hardware_configuration.get("GDFirmwareVersion")->asUint() == 186;
+        && evse.evse_hardware_configuration.get("FirmwareVersion")->asString().compareTo("1.2.460") == 0
+        && evse.evse_hardware_configuration.get("GDFirmwareVersion")->asUint() == 460;
 }
 
 void AC011K::set_phase_switch_stage(PhaseSwitchStage stage) {
@@ -2103,7 +2105,7 @@ void AC011K::loop()
 
                             if ((raw_mode & 0x01) != expected_mode || (raw_mode & 0x20) == 0) {
                                 bs_evse_stop_charging();
-                                set_phase_switch_error(10, "GD v2 mode marker missing or wrong; charging stopped");
+                                set_phase_switch_error(10, "GD selectable-mode marker missing or wrong; charging stopped");
                                 break;
                             }
                             if (reason == 2) {
@@ -2120,7 +2122,7 @@ void AC011K::loop()
                             uint8_t current = evse.evse_state.get("allowed_charging_current")->asUint() / 1000;
                             if (current < 6)
                                 current = 6;
-                            logger.printfln("Verified GD v2 start mode; applying %u-phase charging profile",
+                            logger.printfln("Verified GD selectable start mode; applying %u-phase charging profile",
                                 phase_switch_target);
                             sendChargingLimit3(current, sendSequenceNumber++, phase_switch_target);
                             set_phase_switch_stage(PHASE_SWITCH_CONFIRMING);
