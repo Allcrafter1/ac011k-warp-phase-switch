@@ -1045,9 +1045,15 @@ void AC011K::process_phase_switch() {
     if (gd_close_marker_query_sent
         && physical_phase_verification_pending
         && !gd_close_marker_verified) {
-        if (deadline_elapsed(gd_close_marker_query_started_at + 5000)) {
+        // A first GD start request is not always acted on after reconnecting
+        // or changing the start-power mode.  The restart state machine below
+        // deliberately performs up to three bounded attempts (about 18 s in
+        // total).  Keep the independent physical-hook guard alive beyond
+        // those attempts instead of racing and aborting the first retry at
+        // the old five-second deadline.
+        if (deadline_elapsed(gd_close_marker_query_started_at + 25000)) {
             bs_evse_stop_charging();
-            set_phase_switch_error(10, "GD final phase hook did not execute within 5 seconds; charging stopped");
+            set_phase_switch_error(10, "GD final phase hook did not execute within 25 seconds; charging stopped");
             return;
         }
 
