@@ -716,6 +716,179 @@ void AC011K::send_start_power_mode(uint8_t phases) {
     sendCommand(SetStartPowerMode, sizeof(SetStartPowerMode), sendSequenceNumber++, false);
 }
 
+void AC011K::calculate_power_target(uint32_t power_w, uint8_t rounding_mode,
+                                    uint8_t *phases, uint16_t *current_ma,
+                                    uint32_t *effective_power_w) {
+    if (power_w == 0) {
+        *phases = phase_switch_state.get("commanded_phases")->asUint();
+        if (*phases != 1 && *phases != 3)
+            *phases = 3;
+        *current_ma = 0;
+        *effective_power_w = 0;
+        return;
+    }
+
+    uint32_t best_power = 0;
+    uint32_t best_distance = UINT32_MAX;
+    uint8_t best_phases = 1;
+    uint8_t best_current = 6;
+    bool found = false;
+    const uint8_t commanded_phases = phase_switch_state.get("commanded_phases")->asUint();
+
+    for (uint8_t candidate_phases : {uint8_t(1), uint8_t(3)}) {
+        for (uint8_t candidate_current = 6; candidate_current <= 16; ++candidate_current) {
+            const uint32_t candidate_power =
+                uint32_t(candidate_phases) * uint32_t(candidate_current) * 230UL;
+            bool take = false;
+
+            if (rounding_mode == POWER_ROUND_DOWN) {
+                if (candidate_power <= power_w
+                    && (!found || candidate_power > best_power)) {
+                    take = true;
+                }
+            } else if (rounding_mode == POWER_ROUND_NEAREST) {
+                const uint32_t distance = candidate_power > power_w
+                    ? candidate_power - power_w
+                    : power_w - candidate_power;
+                if (!found || distance < best_distance
+                    || (distance == best_distance
+                        && candidate_phases == commanded_phases
+                        && best_phases != commanded_phases)) {
+                    take = true;
+                }
+            } else {
+                if (candidate_power >= power_w
+                    && (!found || candidate_power < best_power)) {
+                    take = true;
+                }
+            }
+
+            if (take) {
+                found = true;
+                best_power = candidate_power;
+                best_distance = candidate_power > power_w
+                    ? candidate_power - power_w
+                    : power_w - candidate_power;
+                best_phases = candidate_phases;
+                best_current = candidate_current;
+            }
+        }
+    }
+
+    // Requests outside the physically representable range saturate at the
+    // nearest endpoint. Positive requests below 6 A therefore become 1p/6 A.
+    if (!found) {
+        if (rounding_mode == POWER_ROUND_DOWN || power_w < 1380) {
+            best_phases = 1;
+            best_current = 6;
+            best_power = 1380;
+        } else {
+            best_phases = 3;
+            best_current = 16;
+            best_power = 11040;
+        }
+    }
+
+    *phases = best_phases;
+    *current_ma = uint16_t(best_current) * 1000U;
+    *effective_power_w = best_power;
+}
+
+void AC011K::update_power_manager_target_state() {
+    uint8_t phases = 3;
+    uint16_t current_ma = 0;
+    uint32_t effective_power_w = 0;
+    calculate_power_target(
+        power_manager_state.get("requested_power_w")->asUint(),
+        power_manager_config.get("rounding_mode")->asUint(),
+        &phases, &current_ma, &effective_power_w);
+
+    power_manager_state.get("effective_power_w")->updateUint(effective_power_w);
+    power_manager_state.get("target_current_ma")->updateUint(current_ma);
+    power_manager_state.get("target_phases")->updateUint(phases);
+    power_manager_state.get("rounding_mode")->updateUint(
+        power_manager_config.get("rounding_mode")->asUint());
+}
+
+void AC011K::apply_power_manager_current(uint16_t current_ma) {
+    auto external_slot = evse.evse_slots.get(CHARGING_SLOT_EXTERNAL);
+    if (!external_slot->get("active")->asBool()) {
+        evse.apply_slot_default(CHARGING_SLOT_EXTERNAL, current_ma, true, false);
+    } else {
+        external_slot->get("max_current")->updateUint(current_ma);
+    }
+    evse.evse_external_current.get("current")->updateUint(current_ma);
+    power_manager_state.get("applied_current_ma")->updateUint(current_ma);
+}
+
+void AC011K::request_power_target(uint32_t power_w) {
+    if (power_w > 11040) {
+        power_manager_state.get("last_error")->updateString(
+            "power_w must not exceed 11040");
+        return;
+    }
+
+    power_target_control_active = true;
+    power_target_dirty = true;
+    if (phase_switch_stage == PHASE_SWITCH_ERROR)
+        set_phase_switch_stage(PHASE_SWITCH_IDLE);
+    power_manager_state.get("control_active")->updateBool(true);
+    power_manager_state.get("requested_power_w")->updateUint(power_w);
+    power_manager_state.get("pending")->updateBool(true);
+    power_manager_state.get("last_error")->updateString("");
+    update_power_manager_target_state();
+    if (power_w == 0) {
+        resume_after_phase_switch = false;
+        apply_power_manager_current(0);
+    }
+    logger.printfln("Power target requested: %u W -> %u W, %u phase(s), %u mA, rounding %u",
+        power_w,
+        power_manager_state.get("effective_power_w")->asUint(),
+        power_manager_state.get("target_phases")->asUint(),
+        power_manager_state.get("target_current_ma")->asUint(),
+        power_manager_state.get("rounding_mode")->asUint());
+}
+
+void AC011K::process_power_manager() {
+    if (!power_target_control_active || !power_target_dirty
+        || !initialized || firmware_update_running) {
+        return;
+    }
+
+    update_power_manager_target_state();
+
+    if (phase_switch_stage != PHASE_SWITCH_IDLE) {
+        if (phase_switch_stage == PHASE_SWITCH_ERROR) {
+            power_manager_state.get("last_error")->updateString(
+                phase_switch_state.get("last_error_text")->asString());
+        }
+        return;
+    }
+
+    const uint32_t power_w = power_manager_state.get("requested_power_w")->asUint();
+    const uint16_t current_ma = power_manager_state.get("target_current_ma")->asUint();
+    const uint8_t phases = power_manager_state.get("target_phases")->asUint();
+
+    if (power_w == 0) {
+        apply_power_manager_current(0);
+        power_target_dirty = false;
+        power_manager_state.get("pending")->updateBool(false);
+        return;
+    }
+
+    const uint8_t commanded_phases =
+        phase_switch_state.get("commanded_phases")->asUint();
+    if (phases != commanded_phases) {
+        phase_switch_profile_current_ma = current_ma;
+        request_phase_switch(phases, false);
+        return;
+    }
+
+    apply_power_manager_current(current_ma);
+    power_target_dirty = false;
+    power_manager_state.get("pending")->updateBool(false);
+}
+
 bool AC011K::phase_switch_supported() {
     // This build is paired exclusively with the selectable 1.2.460 GD patch
     // for the live-tested 2021 AC011K-AE-25 V1 board. Do not broaden this
@@ -732,8 +905,12 @@ void AC011K::set_phase_switch_stage(PhaseSwitchStage stage) {
     phase_switch_stage = stage;
     phase_switch_stage_since = millis();
     phase_switch_state.get("stage")->updateUint(stage);
-    phase_switch_state.get("switching")->updateBool(
-        stage != PHASE_SWITCH_IDLE && stage != PHASE_SWITCH_ERROR);
+    const bool switching = stage != PHASE_SWITCH_IDLE && stage != PHASE_SWITCH_ERROR;
+    phase_switch_state.get("switching")->updateBool(switching);
+    evse.evse_state.get("phase_switching")->updateBool(switching);
+    evse.evse_state.get("operation_state")->updateString(
+        switching ? "phase_switching"
+                  : (stage == PHASE_SWITCH_ERROR ? "phase_switch_error" : "idle"));
 }
 
 void AC011K::set_phase_switch_error(uint8_t code, const char *text) {
@@ -744,7 +921,7 @@ void AC011K::set_phase_switch_error(uint8_t code, const char *text) {
     set_phase_switch_stage(PHASE_SWITCH_ERROR);
 }
 
-void AC011K::request_phase_switch(uint8_t phases) {
+void AC011K::request_phase_switch(uint8_t phases, bool persist) {
     if (phases != 1 && phases != 3) {
         set_phase_switch_error(2, "Only one or three phases are valid");
         return;
@@ -761,8 +938,10 @@ void AC011K::request_phase_switch(uint8_t phases) {
     if (phase_switch_stage == PHASE_SWITCH_ERROR)
         set_phase_switch_stage(PHASE_SWITCH_IDLE);
 
-    phase_switch_config.get("default_phases")->updateUint(phases);
-    api.writeConfig("evse/phase_switch_config", &phase_switch_config);
+    if (persist) {
+        phase_switch_config.get("default_phases")->updateUint(phases);
+        api.writeConfig("evse/phase_switch_config", &phase_switch_config);
+    }
     phase_switch_state.get("requested_phases")->updateUint(phases);
     phase_switch_state.get("last_error")->updateUint(0);
     phase_switch_state.get("last_error_text")->updateString("");
@@ -775,9 +954,45 @@ void AC011K::finish_phase_switch() {
     phase_switch_state.get("last_switch_ms")->updateUint(millis());
     last_successful_phase_switch = millis();
 
+    if (power_target_control_active) {
+        update_power_manager_target_state();
+        const uint32_t requested_power_w =
+            power_manager_state.get("requested_power_w")->asUint();
+        const uint8_t latest_phases =
+            power_manager_state.get("target_phases")->asUint();
+        const uint16_t latest_current_ma =
+            power_manager_state.get("target_current_ma")->asUint();
+
+        if (requested_power_w == 0 || latest_phases != phase_switch_target) {
+            // Do not close the contactors for an intermediate or obsolete
+            // target. The single pending target is evaluated again from idle.
+            apply_power_manager_current(0);
+            resume_after_phase_switch = false;
+            physical_phase_verification_pending = false;
+            if (requested_power_w == 0) {
+                power_target_dirty = false;
+                power_manager_state.get("pending")->updateBool(false);
+            } else {
+                power_target_dirty = true;
+                power_manager_state.get("pending")->updateBool(true);
+            }
+            set_phase_switch_stage(PHASE_SWITCH_IDLE);
+            return;
+        }
+
+        apply_power_manager_current(latest_current_ma);
+        phase_switch_profile_current_ma = latest_current_ma;
+        power_target_dirty = false;
+        power_manager_state.get("pending")->updateBool(false);
+        resume_after_phase_switch =
+            evse.evse_state.get("iec61851_state")->asUint() != IEC_STATE_A;
+    }
+
     if (resume_after_phase_switch
         && evse.evse_state.get("iec61851_state")->asUint() != IEC_STATE_A
-        && evse.evse_state.get("allowed_charging_current")->asUint() >= 6000) {
+        && (power_target_control_active
+            ? phase_switch_profile_current_ma >= 6000
+            : evse.evse_state.get("allowed_charging_current")->asUint() >= 6000)) {
         restart_attempts = 1;
         bs_evse_start_charging();
         set_phase_switch_stage(PHASE_SWITCH_RESTARTING);
@@ -867,8 +1082,9 @@ void AC011K::process_phase_switch() {
         if ((requested != 1 && requested != 3) || commanded == 0 || requested == commanded)
             return;
 
-        const uint32_t minimum_interval_ms =
-            phase_switch_config.get("minimum_switch_interval")->asUint() * 1000UL;
+        const uint32_t minimum_interval_ms = power_target_control_active
+            ? 0
+            : phase_switch_config.get("minimum_switch_interval")->asUint() * 1000UL;
         if (last_successful_phase_switch != 0
             && !deadline_elapsed(last_successful_phase_switch + minimum_interval_ms)) {
             return;
@@ -877,11 +1093,22 @@ void AC011K::process_phase_switch() {
         phase_switch_target = requested;
         resume_after_phase_switch =
             evse.evse_state.get("iec61851_state")->asUint() != IEC_STATE_A
-            && evse.evse_state.get("allowed_charging_current")->asUint() >= 6000;
+            && (power_target_control_active
+                ? power_manager_state.get("requested_power_w")->asUint() > 0
+                : evse.evse_state.get("allowed_charging_current")->asUint() >= 6000);
         logger.printfln("Starting safe phase switch from %u to %u phase(s); resume=%s",
             commanded, phase_switch_target, resume_after_phase_switch ? "true" : "false");
         bs_evse_stop_charging();
         set_phase_switch_stage(PHASE_SWITCH_STOPPING);
+        if (power_target_control_active) {
+            update_power_manager_target_state();
+            phase_switch_profile_current_ma =
+                power_manager_state.get("target_current_ma")->asUint();
+            apply_power_manager_current(phase_switch_profile_current_ma);
+        } else {
+            phase_switch_profile_current_ma =
+                evse.evse_state.get("allowed_charging_current")->asUint();
+        }
         return;
     }
 
@@ -918,7 +1145,9 @@ void AC011K::process_phase_switch() {
         if (!deadline_elapsed(phase_switch_stage_since + off_delay_ms))
             return;
 
-        uint8_t current = evse.evse_state.get("allowed_charging_current")->asUint() / 1000;
+        uint8_t current = phase_switch_profile_current_ma / 1000;
+        if (!power_target_control_active)
+            current = evse.evse_state.get("allowed_charging_current")->asUint() / 1000;
         if (current < 6)
             current = 6;
         logger.printfln("Contactors are load-free; applying %u-phase start mode", phase_switch_target);
@@ -1213,7 +1442,16 @@ void AC011K::evse_slot_machine() {
         evse.evse_state.get("allowed_charging_current")->updateUint(allowed_charging_current);
         logger.printfln("EVSE Allowed charging current changed from %dmA to %dmA", last_allowed_charging_current, allowed_charging_current);
 
-        if((last_allowed_charging_current == 0) && // now > 0
+        const bool phase_transition_is_load_free = power_target_control_active
+            && phase_switch_stage >= PHASE_SWITCH_STOPPING
+            && phase_switch_stage <= PHASE_SWITCH_CONFIRMING;
+        if (phase_transition_is_load_free) {
+            // The phase-switch state machine sends the matching GD profile.
+            // Do not let a slot update restart charging or race that profile
+            // while the contactors are deliberately kept open.
+            logger.printfln("Deferring normal current action during load-free phase transition");
+        }
+        else if((last_allowed_charging_current == 0) && // now > 0
                 (evse.evse_state.get("iec61851_state")->asUint() == IEC_STATE_B) && // plugged
                 (evse.evse_state.get("charger_state")->asUint() == CHARGER_STATE_WAITING_FOR_RELEASE)) {
             logger.printfln("EVSE Start charging, set allowed charging current to %dmA, IEC_STATE %d", allowed_charging_current, evse.evse_state.get("iec61851_state")->asUint());
@@ -1352,6 +1590,7 @@ void AC011K::update_all_data() {
     evse.update_all_data();
     evse_slot_machine();
     process_gd_relay_diagnostic();
+    process_power_manager();
     process_phase_switch();
 }
 
@@ -1394,6 +1633,27 @@ void AC011K::pre_setup() {
     });
     phase_switch_update = Config::Object({
         {"phases", Config::Uint8(3)},
+    });
+    power_manager_state = Config::Object({
+        {"control_active", Config::Bool(false)},
+        {"requested_power_w", Config::Uint32(0)},
+        {"effective_power_w", Config::Uint32(0)},
+        {"target_current_ma", Config::Uint16(0)},
+        {"applied_current_ma", Config::Uint16(0)},
+        {"target_phases", Config::Uint8(3)},
+        {"rounding_mode", Config::Uint8(POWER_ROUND_UP)},
+        {"pending", Config::Bool(false)},
+        {"last_error", Config::Str("", 0, 96)},
+    });
+    power_target_update = Config::Object({
+        {"power_w", Config::Uint32(0)},
+    });
+    power_manager_config = ConfigRoot(Config::Object({
+        {"rounding_mode", Config::Uint8(POWER_ROUND_UP)},
+    }), [](Config &cfg) -> String {
+        if (cfg.get("rounding_mode")->asUint() > POWER_ROUND_NEAREST)
+            return "rounding_mode must be 0 (up), 1 (down), or 2 (nearest)";
+        return "";
     });
     gd_meter_config_update = Config::Object({
         {"restore_no_external_meter", Config::Bool(false)},
@@ -1493,8 +1753,27 @@ void AC011K::setup() {
         !evse.evse_slots.get(CHARGING_SLOT_AUTOSTART_BUTTON)->get("clear_on_disconnect")->asBool());
 
     api.restorePersistentConfig("evse/phase_switch_config", &phase_switch_config);
+    api.restorePersistentConfig("evse/power_manager_config", &power_manager_config);
     phase_switch_state.get("requested_phases")->updateUint(
         phase_switch_config.get("default_phases")->asUint());
+
+    // Preserve the useful value shown by the existing Home Assistant power
+    // control across an ESP restart. The external-current slot is already
+    // persistent; mirror it into the new power-manager state without taking
+    // ownership of charging until the first explicit power target arrives.
+    auto external_slot = evse.evse_slots.get(CHARGING_SLOT_EXTERNAL);
+    const uint16_t restored_current_ma = external_slot->get("active")->asBool()
+        ? external_slot->get("max_current")->asUint()
+        : 0;
+    const uint8_t restored_phases =
+        phase_switch_config.get("default_phases")->asUint() == 1 ? 1 : 3;
+    const uint16_t whole_amp_current_ma = restored_current_ma >= 6000
+        ? min(uint16_t(16000), uint16_t((restored_current_ma / 1000) * 1000))
+        : 0;
+    power_manager_state.get("requested_power_w")->updateUint(
+        uint32_t(restored_phases) * uint32_t(whole_amp_current_ma / 1000) * 230UL);
+    power_manager_state.get("applied_current_ma")->updateUint(restored_current_ma);
+    update_power_manager_target_state();
 
     Serial2.setRxBufferSize(1024);
     Serial2.begin(115200, SERIAL_8N1, 26, 27); // PrivComm to EVSE GD32 Chip
@@ -2127,7 +2406,9 @@ void AC011K::loop()
                                 break;
                             }
 
-                            uint8_t current = evse.evse_state.get("allowed_charging_current")->asUint() / 1000;
+                            uint8_t current = phase_switch_profile_current_ma / 1000;
+                            if (!power_target_control_active)
+                                current = evse.evse_state.get("allowed_charging_current")->asUint() / 1000;
                             if (current < 6)
                                 current = 6;
                             logger.printfln("Verified GD selectable start mode; applying %u-phase charging profile",
@@ -2568,10 +2849,25 @@ void AC011K::register_urls()
     evse.register_urls();
 
     api.addState("evse/phase_switch", &phase_switch_state, {}, 1000);
+    api.addState("evse/power_manager", &power_manager_state, {}, 250);
+    api.addState("evse/power_manager_config", &power_manager_config, {}, 1000);
     api.addState("evse/gd_relay_diagnostic", &gd_relay_diagnostic_state, {}, 250);
     api.addPersistentConfig("evse/phase_switch_config", &phase_switch_config, {}, 1000);
     api.addCommand("evse/phase_switch_update", &phase_switch_update, {}, [this](){
         request_phase_switch(phase_switch_update.get("phases")->asUint());
+    }, true);
+
+    api.addCommand("evse/power_target_update", &power_target_update, {}, [this](){
+        request_power_target(power_target_update.get("power_w")->asUint());
+    }, true);
+
+    api.addCommand("evse/power_manager_config_update", &power_manager_config, {}, [this](){
+        api.writeConfig("evse/power_manager_config", &power_manager_config);
+        update_power_manager_target_state();
+        if (power_target_control_active) {
+            power_target_dirty = true;
+            power_manager_state.get("pending")->updateBool(true);
+        }
     }, false);
 
     api.addCommand("evse/gd_relay_diagnostic_update", &gd_relay_diagnostic_update, {}, [this](){

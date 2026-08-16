@@ -59,6 +59,8 @@ void EVSEV2::pre_setup()
         {"iec61851_state", Config::Uint8(0)},
         {"charger_state", Config::Uint8(0)},
         {"GD_state", Config::Uint8(0)},
+        {"phase_switching", Config::Bool(false)},
+        {"operation_state", Config::Str("idle", 0, 24)},
         {"contactor_state", Config::Uint8(0)},
         {"contactor_error", Config::Uint8(0)},
         {"allowed_charging_current", Config::Uint16(0)},

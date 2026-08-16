@@ -205,6 +205,38 @@ Entity(False, Component.BINARY_SENSOR, Feature.EVSE, "phase_switching", "evse/ph
      "payload_on":"True",
      "payload_off":"False",
      "icon":"mdi:swap-horizontal"}),
+
+Entity(False, Component.SELECT, Feature.EVSE, "power_rounding", "evse/power_manager_config", "Leistungsrundung", "Power rounding",
+    {},
+    {"value_template":"{{ {0: 'Aufrunden', 1: 'Abrunden', 2: 'Nächster Wert'}.get(value_json.rounding_mode, 'Aufrunden') }}",
+     "command_template":"{\"rounding_mode\": {{ {'Aufrunden': 0, 'Abrunden': 1, 'Nächster Wert': 2}.get(value, 0) }}}",
+     "options":["Aufrunden", "Abrunden", "Nächster Wert"],
+     "icon":"mdi:approximately-equal"}),
+
+Entity(True, Component.SENSOR, Feature.EVSE, "power_target_effective", "evse/power_manager", "Umgesetzte Ladeleistung", "Effective charging power target",
+    {"value_template":"{{ (value_json.effective_power_w / 1000) | round(2) }}",
+     "unit_of_measurement":"kW",
+     "device_class":"power",
+     "icon":"mdi:ev-station"},
+    {}),
+
+Entity(True, Component.SENSOR, Feature.EVSE, "power_target_requested", "evse/power_manager", "Angeforderte Ladeleistung", "Requested charging power",
+    {"value_template":"{{ (value_json.requested_power_w / 1000) | round(2) }}",
+     "unit_of_measurement":"kW",
+     "device_class":"power",
+     "icon":"mdi:target"},
+    {}),
+
+Entity(True, Component.SENSOR, Feature.EVSE, "power_target_current", "evse/power_manager", "Berechneter Ladestrom", "Calculated charging current",
+    {"value_template":"{{ value_json.target_current_ma }}",
+     "unit_of_measurement":"mA",
+     "icon":"mdi:current-ac"},
+    {}),
+
+Entity(True, Component.SENSOR, Feature.EVSE, "power_target_phases", "evse/power_manager", "Berechnete Ladephasen", "Calculated charging phases",
+    {"value_template":"{{ value_json.target_phases }}",
+     "icon":"mdi:transmission-tower"},
+    {}),
 ]
 
 topics = [topic_template.format(

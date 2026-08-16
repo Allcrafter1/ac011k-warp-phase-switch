@@ -178,6 +178,9 @@ public:
     ConfigRoot phase_switch_state;
     ConfigRoot phase_switch_update;
     ConfigRoot phase_switch_config;
+    ConfigRoot power_manager_state;
+    ConfigRoot power_target_update;
+    ConfigRoot power_manager_config;
     ConfigRoot gd_meter_config_update;
     ConfigRoot gd_relay_diagnostic_state;
     ConfigRoot gd_relay_diagnostic_update;
@@ -193,12 +196,25 @@ public:
         PHASE_SWITCH_ERROR = 7,
     };
 
+    enum PowerRoundingMode : uint8_t {
+        POWER_ROUND_UP = 0,
+        POWER_ROUND_DOWN = 1,
+        POWER_ROUND_NEAREST = 2,
+    };
+
     bool phase_switch_supported();
-    void request_phase_switch(uint8_t phases);
+    void request_phase_switch(uint8_t phases, bool persist = true);
     void process_phase_switch();
     void set_phase_switch_stage(PhaseSwitchStage stage);
     void set_phase_switch_error(uint8_t code, const char *text);
     void finish_phase_switch();
+    void request_power_target(uint32_t power_w);
+    void process_power_manager();
+    void calculate_power_target(uint32_t power_w, uint8_t rounding_mode,
+                                uint8_t *phases, uint16_t *current_ma,
+                                uint32_t *effective_power_w);
+    void apply_power_manager_current(uint16_t current_ma);
+    void update_power_manager_target_state();
     void request_gd_relay_diagnostic(uint8_t group);
     void process_gd_relay_diagnostic();
 
@@ -210,6 +226,9 @@ public:
     uint32_t last_phase_current_update = 0;
     uint32_t last_successful_phase_switch = 0;
     bool resume_after_phase_switch = false;
+    bool power_target_control_active = false;
+    bool power_target_dirty = false;
+    uint16_t phase_switch_profile_current_ma = 0;
     bool physical_phase_verification_pending = false;
     bool gd_start_power_get_pending = false;
     uint8_t gd_start_power_get_reason = 0;
