@@ -8,6 +8,8 @@ AC011K WARP PhaseSwitch
 > board** and one MG4, but it is not assumed to work on every visually
 > similar AC011K/AC011E revision.
 
+Please note that while tested, the whole Project was done with AI. I take no responsibility if you damage your Wallbox or simular. I kinda Supervised the AI but I cant't tell if Codex has done weird things.
+
 Start here: **[project report, compatibility and installation](extras/ac011k-phase-switch/README.md)**.
 
 The original WARP More project continues below.
