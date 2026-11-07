@@ -1,8 +1,8 @@
 # Working plan: ESP32, MQTT and Home Assistant
 
-Started 2026-09-26. ESP deployed on 2026-11-07 and functional HA migration completed. Empty legacy
-device cleanup awaits approval for its invalid helper reference; physical vehicle
-acceptance and GitHub push remain outstanding. Current documentation is English, as requested.
+Started 2026-09-26. ESP deployed on 2026-11-07; HA migration and legacy-device
+cleanup are complete. Physical vehicle acceptance and GitHub push remain
+outstanding. Current documentation is English, as requested.
 
 ## Completed locally
 
@@ -29,7 +29,7 @@ acceptance and GitHub push remain outstanding. Current documentation is English,
 - [ ] Migrate all eight working manual entities and existing discovery entities to
       canonical IDs; retire four unimplemented placeholder sensors.
 - [ ] Update automations/scripts/dashboard/device actions through supported HA APIs.
-- [ ] Reassign unrelated helper attached to legacy device before device cleanup.
+- [x] Remove the broken unused helper and the empty legacy MQTT device.
 - [ ] Validate/reload HA, scan stale references and verify discovery recovery.
 - [ ] Execute physical acceptance checklist and record results/logs.
 - [ ] Review final diff, commit and push to GitHub after testing and migration.
@@ -76,7 +76,7 @@ Details: [October incident](extras/ac011k-phase-switch/INCIDENT_2026-10-06.md).
 - [x] Refresh private backups, live state and HA consumer inventory.
 - [x] Build candidate, verify idle wallbox, deploy ESP only and verify boot.
 - [x] Migrate all functional entities and consumers; charge check now monitors only.
-- [ ] Detach invalid legacy helper and delete empty old device after requested approval.
+- [x] Remove invalid legacy helper and delete empty old device after approval.
 - [x] Record deployment evidence and remaining physical tests.
 
 The owner now authorizes flashing and HA migration. Previous deployment deferral
@@ -93,8 +93,9 @@ is superseded; practical load/vehicle tests still need the available setup.
   Release remained closed and measured power zero. Vehicle tests still pending.
 - Corrected OTA documentation: existing updater REQUIRES merged container with
   firmware info, then writes application only. Raw app precheck rejected safely.
-- Automatic approval review rejected normalization/detachment of old invalid
-  template helper. User asked; helper unchanged and empty legacy device kept.
+- The invalid `lolololo` template helper had no entity or consumers and only
+  summed three unrelated `*_energy2` sensors. It and the empty old device were
+  removed on 2026-11-08 after explicit approval; no stale IDs remain.
 - Full HA backup `9af0f065` includes database. Private evidence in
   ../backups/2026-11-07-deployment. No GitHub push.
 

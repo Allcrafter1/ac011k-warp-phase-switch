@@ -4,7 +4,7 @@ ESP `2.0.12-6aefa6d4` is running. AXITEC device metadata and 40 discovery
 entities are live; manual wallbox entities have been removed. Error-limit,
 fresh-current and obsolete-restart protections are included. Unloaded command
 checks passed in both directions; vehicle-load tests remain outstanding.
-Empty legacy-device cleanup is waiting on approval for its invalid helper.
+The broken unused helper and empty legacy MQTT device were removed after approval.
 See [deployment details](DEPLOYMENT_2026-11-07.md).
 
 # September candidate history

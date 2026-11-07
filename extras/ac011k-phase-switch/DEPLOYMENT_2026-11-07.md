@@ -46,16 +46,21 @@ unavailable states. The ESP retains its own bounded phase-restart sequence.
 The old automation entity ID was retained for callers, with a corrected display
 name. Start/Stop scripts now invoke the discovery buttons.
 
-### Remaining legacy-device cleanup
+### Legacy-device cleanup completed on 8 November
 
-All wallbox functions are on the discovery device. The old generic MQTT device
-currently has **zero entities**, but an old template-helper configuration still
-references it. Its existing min/max/step values are invalid under the current
-HA form schema, and its required set-value action is missing. Even a pure device
-detachment fails validation. A proposed normalization/detachment was rejected by
-automatic approval review because it also changes helper configuration. User
-approval is pending; neither the helper nor the empty device has been deleted.
-This is the remaining step before the device list contains only one wallbox.
+All wallbox functions are on the discovery device. The remaining `lolololo`
+template helper was already in `setup_error`, created no entity, had no consumers
+and only summed three unrelated `*_energy2` sensors. After explicit approval it
+was removed, followed by the empty generic MQTT device. Read-back checks found
+neither the helper/config entry nor the old device and identifier. The active
+configuration contains no manual `axitec_wallbox_*` definitions or stale legacy
+references. The pre-migration full backup remains the recovery path for these
+registry deletions.
+
+The discovery entity `number.ac011k_current_limit` is the inherited WARP global
+current-slot ceiling. Its 32 A value does not override this wallbox's independent
+16 A cable/hardware slot. Normal operation uses `number.ac011k_power_limit`; the
+ESP maps that kW target to the external current slot and phase controller.
 
 ## Validation
 
