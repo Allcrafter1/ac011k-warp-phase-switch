@@ -914,7 +914,20 @@ void AC011K::set_phase_switch_stage(PhaseSwitchStage stage) {
 }
 
 void AC011K::set_phase_switch_error(uint8_t code, const char *text) {
+    // An error must also revoke the active limit, not only block Start.
+    // Otherwise a later slot update or GD limit request can keep old power alive.
+    bs_evse_stop_charging();
+    if (power_target_control_active) {
+        apply_power_manager_current(0);
+        power_target_dirty = true;
+        power_manager_state.get("pending")->updateBool(true);
+        power_manager_state.get("last_error")->updateString(text);
+    }
     physical_phase_verification_pending = false;
+    resume_after_phase_switch = false;
+    gd_start_power_get_pending = false;
+    gd_start_power_get_reason = 0;
+    gd_close_marker_query_sent = false;
     phase_switch_state.get("last_error")->updateUint(code);
     phase_switch_state.get("last_error_text")->updateString(text);
     logger.printfln("Phase switch error %u: %s", code, text);
@@ -990,12 +1003,10 @@ void AC011K::finish_phase_switch() {
 
     if (resume_after_phase_switch
         && evse.evse_state.get("iec61851_state")->asUint() != IEC_STATE_A
-        && (power_target_control_active
-            ? phase_switch_profile_current_ma >= 6000
-            : evse.evse_state.get("allowed_charging_current")->asUint() >= 6000)) {
+        && charging_current_from_slots() >= 6000) {
         restart_attempts = 1;
-        bs_evse_start_charging();
         set_phase_switch_stage(PHASE_SWITCH_RESTARTING);
+        bs_evse_start_charging();
         return;
     }
 
@@ -1074,11 +1085,7 @@ void AC011K::process_phase_switch() {
         return;
 
     if (phase_switch_stage == PHASE_SWITCH_ERROR) {
-        // A fresh valid request can recover without rebooting.
-        if (phase_switch_state.get("requested_phases")->asUint()
-            == phase_switch_state.get("commanded_phases")->asUint()) {
-            set_phase_switch_stage(PHASE_SWITCH_IDLE);
-        }
+        // Keep the fault visible until an explicit fresh request arrives.
         return;
     }
 
@@ -1157,8 +1164,11 @@ void AC011K::process_phase_switch() {
         const bool current_is_zero = last_phase_current_deciamp[0] <= 5
                                   && last_phase_current_deciamp[1] <= 5
                                   && last_phase_current_deciamp[2] <= 5;
-        if (fresh_current && !current_is_zero)
+        if (!fresh_current || !current_is_zero) {
+            if (deadline_elapsed(phase_switch_stage_since + 30000))
+                set_phase_switch_error(12, "No fresh zero-current proof within 30 seconds");
             return;
+        }
 
         const uint32_t off_delay_ms =
             phase_switch_config.get("minimum_off_time")->asUint() * 1000UL;
@@ -1185,6 +1195,19 @@ void AC011K::process_phase_switch() {
     if (phase_switch_stage == PHASE_SWITCH_CONFIRMING) {
         if (deadline_elapsed(phase_switch_stage_since + 20000))
             set_phase_switch_error(9, "GD did not acknowledge the requested charging profile");
+        return;
+    }
+
+    if ((phase_switch_stage == PHASE_SWITCH_RESTARTING
+         || phase_switch_stage == PHASE_SWITCH_RESTART_PAUSE)
+        && (evse.evse_state.get("iec61851_state")->asUint() == IEC_STATE_A
+            || charging_current_from_slots() < 6000
+            || (power_target_control_active && power_target_dirty))) {
+        resume_after_phase_switch = false;
+        physical_phase_verification_pending = false;
+        gd_close_marker_query_sent = false;
+        bs_evse_stop_charging();
+        set_phase_switch_stage(PHASE_SWITCH_IDLE);
         return;
     }
 
@@ -1231,9 +1254,6 @@ void AC011K::validate_physical_phase_count() {
         if (last_phase_current_deciamp[i] >= 10)
             ++observed_phases;
     }
-    phase_switch_state.get("measured_current_l1_deciamp")->updateUint(last_phase_current_deciamp[0]);
-    phase_switch_state.get("measured_current_l2_deciamp")->updateUint(last_phase_current_deciamp[1]);
-    phase_switch_state.get("measured_current_l3_deciamp")->updateUint(last_phase_current_deciamp[2]);
     if (observed_phases == 0)
         return;
 
@@ -1323,8 +1343,32 @@ void AC011K::process_gd_relay_diagnostic() {
 }
 
 
+uint16_t AC011K::charging_current_from_slots() {
+    uint16_t current = 32000;
+    for (int i = 0; i < CHARGING_SLOT_COUNT; ++i) {
+        auto slot = evse.evse_slots.get(i);
+        if (slot->get("active")->asBool())
+            current = min(current, uint16_t(slot->get("max_current")->asUint()));
+    }
+    return current;
+}
+
 int AC011K::bs_evse_start_charging() {
-    uint8_t allowed_charging_current = uint8_t(evse.evse_state.get("allowed_charging_current")->asUint()/1000);
+    // A power target is a limit, never permission to bypass another slot.
+    // Read live slots: their cached aggregate can lag a command by one tick.
+    const uint16_t current_ma = charging_current_from_slots();
+    if (!initialized || firmware_update_running || current_ma < 6000
+        || evse.evse_state.get("iec61851_state")->asUint() == IEC_STATE_A
+        || evse.evse_state.get("GD_state")->asUint() >= 7
+        || evse.evse_state.get("charger_state")->asUint() == CHARGER_STATE_ERROR
+        || phase_switch_stage == PHASE_SWITCH_ERROR
+        || (phase_switch_stage >= PHASE_SWITCH_STOPPING
+            && phase_switch_stage <= PHASE_SWITCH_CONFIRMING)) {
+        logger.printfln("EVSE start refused: no connected, fault-free charging release (%u mA)", current_ma);
+        return -1;
+    }
+    evse.evse_state.get("allowed_charging_current")->updateUint(current_ma);
+    uint8_t allowed_charging_current = uint8_t(current_ma / 1000);
     logger.printfln("EVSE start charging with max %d Ampere", allowed_charging_current);
 
     switch (evse.evse_hardware_configuration.get("GDFirmwareVersion")->asUint()) {
@@ -1436,12 +1480,8 @@ void AC011K::evse_slot_machine() {
     }
 
     // find the charging current maximum
-    uint16_t allowed_charging_current = 32000;
-    for (int i = 0; i < CHARGING_SLOT_COUNT; ++i) {
-        if (!evse.evse_slots.get(i)->get("active")->asBool())
-            continue;
-        allowed_charging_current = min(allowed_charging_current, (uint16_t)evse.evse_slots.get(i)->get("max_current")->asUint());
-    }
+    uint16_t allowed_charging_current = phase_switch_stage == PHASE_SWITCH_ERROR
+        ? 0 : charging_current_from_slots();
 
     // plugged in
     if((last_iec61851_state == IEC_STATE_A) && (evse.evse_state.get("iec61851_state")->asUint() == IEC_STATE_B) && (allowed_charging_current > 0)) {
@@ -1462,8 +1502,8 @@ void AC011K::evse_slot_machine() {
         evse.evse_state.get("allowed_charging_current")->updateUint(allowed_charging_current);
         logger.printfln("EVSE Allowed charging current changed from %dmA to %dmA", last_allowed_charging_current, allowed_charging_current);
 
-        const bool phase_transition_is_load_free = power_target_control_active
-            && phase_switch_stage >= PHASE_SWITCH_STOPPING
+        const bool phase_transition_is_load_free =
+            phase_switch_stage >= PHASE_SWITCH_STOPPING
             && phase_switch_stage <= PHASE_SWITCH_CONFIRMING;
         if (phase_transition_is_load_free) {
             // The phase-switch state machine sends the matching GD profile.
@@ -1761,7 +1801,7 @@ void AC011K::setup() {
         evse.apply_slot_default(CHARGING_SLOT_OUTGOING_CABLE, 16000, true, false);
         evse.apply_slot_default(CHARGING_SLOT_SHUTDOWN_INPUT, 0, false, false);
         evse.apply_slot_default(CHARGING_SLOT_GP_INPUT, 0, false, false);
-        evse.apply_slot_default(CHARGING_SLOT_AUTOSTART_BUTTON, 0, false, false);
+        evse.apply_slot_default(CHARGING_SLOT_AUTOSTART_BUTTON, 0, true, true);
         if (!evse.evse_slots.get(CHARGING_SLOT_GLOBAL)->get("active")->asBool())
             evse.apply_slot_default(CHARGING_SLOT_GLOBAL, 32000, true, false);
         evse.apply_slot_default(CHARGING_SLOT_USER, 0, evse.evse_slots.get(CHARGING_SLOT_USER)->get("active")->asBool(), true);
@@ -1770,6 +1810,11 @@ void AC011K::setup() {
         evse.apply_slot_default(CHARGING_SLOT_MODBUS_TCP, 0, false, false);
         evse.apply_slot_default(CHARGING_SLOT_MODBUS_TCP_ENABLE, 0, false, false);
         evse.apply_slot_default(CHARGING_SLOT_OCPP, 0, false, false);
+    }
+    // Session releases must not survive a reboot via a persisted slot snapshot.
+    for (int i = 0; i < CHARGING_SLOT_COUNT; ++i) {
+        if (evse.evse_slots.get(i)->get("clear_on_disconnect")->asBool())
+            evse.evse_slots.get(i)->get("max_current")->updateUint(0);
     }
     evse.evse_auto_start_charging.get("auto_start_charging")->updateBool(
         !evse.evse_slots.get(CHARGING_SLOT_AUTOSTART_BUTTON)->get("clear_on_disconnect")->asBool());
@@ -2233,6 +2278,10 @@ void AC011K::loop()
                     last_phase_current_deciamp[1] = getPrivCommRxBufferUint16(108);
                     last_phase_current_deciamp[2] = getPrivCommRxBufferUint16(110);
                     last_phase_current_update = millis();
+                    phase_switch_state.get("measured_current_l1_deciamp")->updateUint(last_phase_current_deciamp[0]);
+                    phase_switch_state.get("measured_current_l2_deciamp")->updateUint(last_phase_current_deciamp[1]);
+                    phase_switch_state.get("measured_current_l3_deciamp")->updateUint(last_phase_current_deciamp[2]);
+
                     validate_physical_phase_count();
 
                     // meter power
@@ -2712,7 +2761,9 @@ void AC011K::loop()
 
             case 0x0E: { // ChargingParameterRpt
                 const uint16_t cp_voltage_raw = getPrivCommRxBufferUint16(19);
-                if(ac011k_hardware.config.get("verbose_communication")->asBool() 
+                if(ac011k_hardware.config.get("verbose_communication")->asBool()
+                    || phase_switch_stage == PHASE_SWITCH_STOPPING
+                    || phase_switch_stage == PHASE_SWITCH_OFF_DELAY
                     // report on changes
                     || (evse.evse_low_level_state.get("cp_pwm_duty_cycle")->asUint() != getPrivCommRxBufferUint16(17)) //duty
                     // || (evse.evse_low_level_state.get("adc_values")->get(6)->asUint() != getPrivCommRxBufferUint16(19)) //cpVolt
@@ -2881,6 +2932,7 @@ void AC011K::loop()
 void AC011K::register_urls()
 {
     evse.register_urls();
+    api.addFeature("ac011k");
 
     api.addState("evse/phase_switch", &phase_switch_state, {}, 1000);
     api.addState("evse/power_manager", &power_manager_state, {}, 250);

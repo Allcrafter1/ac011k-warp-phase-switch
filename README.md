@@ -1,36 +1,42 @@
-AC011K WARP PhaseSwitch
-=======================
+# AC011K WARP PhaseSwitch
 
-> **Experimental dynamic 1↔3 phase switching for the AC011K-AE-25.**
->
-> This fork combines WARP More on the ESP32 with a minimal GD32 1.2.460
-> patch. It has been physically verified on **one 2021 AC011K-AE-25 V1
-> board** and one MG4, but it is not assumed to work on every visually
-> similar AC011K/AC011E revision.
+An older AC011K-AE-25 can charge on N+L1, then switch to three phases when more
+power is available. This fork makes that work on the tested 2021 V1 board:
+Home Assistant supplies a power limit, the ESP32 handles the transition, and a
+small GD32 patch selects the relay closing sequence.
+
+The useful range starts at **1.38 kW on one phase** and reaches **11.04 kW on
+three phases**. Both directions were tested with a CP simulator, separate lamp
+loads and an MG4. Compatibility is specific to the board and GD image below.
+
+![The tested relay board](extras/ac011k-phase-switch/images/tested-v1-relays.png)
+
+## Read this first
+
+- [Hardware, capabilities and project background](extras/ac011k-phase-switch/README.md)
+- [Architecture and charging permission](extras/ac011k-phase-switch/ARCHITECTURE.md)
+- [Build, installation and recovery](extras/ac011k-phase-switch/INSTALLATION.md)
+- [MQTT, Home Assistant and migration](extras/ac011k-phase-switch/HOME_ASSISTANT.md)
+- [Tests and troubleshooting](extras/ac011k-phase-switch/TESTING.md)
+- [How the GD32 relay patch was found](extras/ac011k-phase-switch/REVERSE_ENGINEERING.md)
+- [September ESP32/MQTT review](extras/ac011k-phase-switch/REVIEW_2026-09.md)
+
+The September changes have host regression coverage and an ESP32 build. That
+is separate from physical acceptance of the new firmware; see the test page
+for the remaining checks and the working plan for deployment status.
+
+## Project owner's notice
 
 Please note that while tested, the whole Project was done with AI. I take no responsibility if you damage your Wallbox or simular. I kinda Supervised the AI but I cant't tell if Codex has done weird things.
 
-Start here: **[project report, compatibility and installation](extras/ac011k-phase-switch/README.md)**.
+## Where this comes from
 
-The original WARP More project continues below.
+This is a fork of [WARP More](https://github.com/warp-more-hardware/esp32-firmware),
+which adapts Tinkerforge's WARP firmware to additional hardware. The existing
+web interface, API, MQTT bridge, discovery infrastructure and GD updater are
+community work; this project extends the AC011K control path.
 
-warp-more-hardware ESP32 firmware
----------------------------------
-
-This is the README.md for the warp-more-hardware project that 
-adds support for more hardware than just the awsome stuff that 
-[TinkerForge](https://www.tinkerforge.com/en/shop/) has to offer.
-
-*The original [README.rst](README.rst) is really worth a read as well!*
-
-> **Please make sure not to bother the TinkerForge people when you**  
-> **encounter issues with this fork of the software running on non**  
-> **TinkerForge hardware.**
-
-Please use our [issue tracker](https://github.com/warp-more-hardware/esp32-firmware/issues) instead.
-
-Or even better, join the project, fix it yourself and open a 
-[pull request](https://github.com/warp-more-hardware/esp32-firmware/pulls)
-
-Find more information on how to build the software yourself 
-in the [software/README.md](software/README.md).
+Use [this fork's issue tracker](https://github.com/Allcrafter1/ac011k-warp-phase-switch/issues)
+for its phase-switching changes. Please do not direct support requests for
+modified AC011K hardware to Tinkerforge. The original [WARP README](README.rst)
+and [community build notes](software/README.md) remain available.

@@ -151,6 +151,7 @@ public:
     byte PrivCommRxBuffer[PRIV_COMM_BUFFER_MAX_SIZE] = {'0'};
     byte PrivCommTxBuffer[PRIV_COMM_BUFFER_MAX_SIZE] = {0xFA, 0x03, 0x00, 0x00}; // Magic byte, Version, 16 bit Address - always the same
 
+    uint16_t charging_current_from_slots();
     int bs_evse_start_charging();
     int bs_evse_stop_charging();
     int bs_evse_set_charging_autostart(bool autostart);

@@ -1,135 +1,110 @@
-# Home Assistant, MQTT and the current migration state
+# MQTT and Home Assistant
 
-The wallbox implementation deliberately keeps energy strategy and physical
-switching on different levels:
+The firmware uses the existing WARP MQTT bridge. Set a unique client name and
+a per-device API prefix, then enable Home Assistant discovery in the web UI.
+Discovery announcements are retained and periodically refreshed. IDs are based
+on the configured client name; keep that name stable across upgrades.
 
-- Home Assistant/EMHASS decides the desired charging power.
-- The ESP32 converts power to phases/current and owns the safe transition.
-- The GD32 continues normal low-level EVSE control.
+Examples below use `AC011K/DEVICE` as the API prefix and `AC011K-DEVICE` as the
+client name. Replace them with your own configuration.
 
-## MQTT added by this fork
+The 7 November migration moved all working entities to the discovery device;
+see [deployment status and remaining cleanup](DEPLOYMENT_2026-11-07.md).
 
-The code registers ordinary WARP API state and command objects. The existing
-WARP MQTT bridge publishes them below the configured device prefix, normally:
+## Daily controls
 
-```text
-AC011K/<device-id>/evse/...
-```
-
-Important paths:
-
-| Path | Direction | Purpose |
+| Control | State | Command |
 |---|---|---|
-| `power_manager` | state | requested/effective W, current, phases, pending/error |
-| `power_target_update` | command | one desired power in W |
-| `power_manager_config` | state | rounding mode |
-| `power_manager_config_update` | command | change rounding mode |
-| `phase_switch` | state | stage, active/requested phases, markers, raw CP, errors |
-| `phase_switch_update` | command | low-level diagnostic/manual phase request |
-
-Example command:
+| Charging power limit, kW | `evse/power_manager` | `evse/power_target_update` |
+| Start | — | `evse/start_charging` |
+| Stop | — | `evse/stop_charging` |
+| Autostart | `evse/auto_start_charging` | `evse/auto_start_charging_update` |
+| Rounding | `evse/power_manager_config` | `evse/power_manager_config_update` |
 
 ```json
 {"power_w": 5000}
 ```
 
-The returned effective value may be 5,520 W because the vehicle is controlled
-in whole amperes and the ESP only selects valid 1/3-phase combinations.
+The power slider displays the *effective nominal limit*, so 5.00 kW settles at
+5.52 kW with upward rounding. Zero pauses power. A positive value below 1.38 kW
+saturates to 1.38 kW, including in round-down mode; an EMS that cannot allow grid
+import must send zero below the minimum. A power target does not replace Start.
 
-## What Auto Discovery already provides
+Start and Stop accept `null`. Autostart accepts
+`{"auto_start_charging": false}`. Commands must be non-retained; retained
+start/stop/power/phase actions are rejected on subscription replay. Do not use
+retained commands as an automation memory.
 
-The ESP firmware auto-discovers:
+## What discovery exposes
 
-- phase-mode select;
-- active-phase sensor;
-- phase-switching binary sensor;
-- rounding-mode select;
-- requested and effective power sensors;
-- calculated current sensor;
-- calculated phase-count sensor.
+Alongside the existing total power, energy, vehicle state, start/stop and
+configuration controls, the AC011K additions provide:
 
-The manual phase select cannot bypass the stop/CP-B/off-delay/restart state
-machine. It remains useful for diagnostics but is not the intended normal UI;
-normal users should set only a power target.
+- power-limit slider, requested/rounded power, target current and phases;
+- applied current limit, separately from the calculated target;
+- phase and rounding selectors, placed in the configuration category;
+- GD charging state, IEC state, logical contactor state and allowed current;
+- L1/L2/L3 current in A and voltage in V, with measurement state classes;
+- start/stop release, pending power target, phase-switch stage and error text;
+- raw CP and GD fault diagnostics.
 
-## Why the main kW slider is still manual
+The existing manually configured charger-state sensor duplicates the discovery
+vehicle-state sensor. Start and Stop are duplicates too. The manual power
+slider and GD-state text sensor need new discovery counterparts. The old
+EVSE-error-code, contactor-error, lock-state and DC-fault-current fields are zero-initialized
+placeholders in this AC011K adapter; they are not independent working safety
+measurements and are not promoted into new discovery sensors.
 
-On the first production Home Assistant instance, a large power slider already
-existed with this stable identity:
+The `active_phases` legacy sensor describes the last verified phase count.
+For live current, use the new current sensors from `meter/all_values`, not the
+previously frozen phase-verification snapshot. External Shelly/three-phase
+meters are separate instruments and must remain separate devices.
 
-```text
-unique_id: axitec_wallbox_power_limit
-entity: number.ac0011k_axitec_wallbox_ladeleistung_kw
-```
+## Migration from manual YAML
 
-Changing the control path and its HA identity at the same time would have made
-it harder to tell a wallbox bug from an entity migration bug. The existing
-number, dashboard position and automations were therefore retained while only
-its MQTT topics and templates changed.
+The old installation had two MQTT device identifiers: a generic manual one
+and the serial-specific discovery identifier. That split, plus duplicate
+start/stop/state definitions, explains the parallel entities.
 
-The installation-specific entity is equivalent to:
+Migration order matters:
 
-```yaml
-mqtt:
-  number:
-    - name: AC011K Axitec Wallbox Ladeleistung kW
-      unique_id: axitec_wallbox_power_limit
-      state_topic: "AC011K/REPLACE_DEVICE_ID/evse/power_manager"
-      command_topic: "AC011K/REPLACE_DEVICE_ID/evse/power_target_update"
-      value_template: "{{ (value_json.effective_power_w / 1000) | round(2) }}"
-      command_template: '{"power_w": {{ (value | float * 1000) | round(0) | int }}}'
-      min: 1.38
-      max: 11.04
-      step: 0.01
-      mode: slider
-      unit_of_measurement: kW
-      device_class: power
-      icon: mdi:ev-station
-```
+1. Back up YAML, entity/device registry metadata, discovery payloads, dashboards
+   and affected automation/script configurations. Keep private exports out of Git.
+2. Install the new ESP firmware and verify every replacement topic and value.
+   The old firmware deletes discovery topics it does not recognize under its
+   own node ID; publishing new topics from a temporary helper is not a durable fix.
+3. Map each old entity to one canonical discovery entity. Search YAML packages,
+   UI automations, scripts, dashboards, helper options, device triggers and any
+   Node-RED/AppDaemon configuration. MCP search alone can miss YAML definitions.
+4. Remove only the old wallbox MQTT YAML definitions, validate the complete HA
+   configuration, and reload MQTT. Avoid a whole-HA restart.
+5. Update all consumers through HA APIs and give the discovery entities a
+   consistent `ac011k_*` naming scheme. Replace device actions with entity actions
+   where the old MQTT device will disappear.
+6. Remove orphan registry entries only after consumer verification. Do not delete
+   the old device blindly: unrelated helpers may have been attached to it.
+7. Read back the written configuration, check for stale references and compare
+   state with the wallbox API. Do not press Start merely to test an entity rename.
 
-Replace `REPLACE_DEVICE_ID`; never copy another installation's serial/device
-prefix. The displayed slider intentionally follows `effective_power_w`, so it
-settles on the value the 1-A grid can really produce.
+The repository includes a read-only [migration planner](tools/plan_ha_migration.py).
+It generates the entity mapping and reports references from exported files;
+execution still needs the live checks above. See [the review](REVIEW_2026-09.md)
+and working plan for this installation's actual deployment status.
 
-## Other Home Assistant changes on the tested installation
+## EMS integration
 
-- The existing charging-stop notification remains enabled.
-- It now requires the auto-discovered `phase_switching` binary sensor to be
-  off, preventing an intended phase transition from looking like an unexpected
-  charging stop.
-- The raw/transliterated GD state remains unchanged. ESP phase-switch state is
-  separate because the GD cannot report an ESP orchestration state.
-- The large power number is rendered as a slider in the existing
-  `Wallbox & Ladeplanung` entities card.
-- Old disabled prototype automations were not reactivated.
-- EMHASS is not yet in charge of production targets.
+Let the EMS publish a single power target, rather than coordinating phase
+select and current controls independently. Keep forecast/PV hysteresis in the
+EMS; the ESP owns the physical stop/switch/restart sequence. Rate-limit target
+changes around the 1P/3P boundary. Deliberately grant a session after plugging
+in, and revoke it on Stop/unplug. No production EMHASS automation is enabled
+by the examples or this firmware review.
 
-## Why this feature matters for smaller PV systems
+The current bridge retains state, but has no general MQTT last-will availability
+for every entity. Its online sensor has an expiry; other retained values can
+remain visible while disconnected. Treat online status as a prerequisite for
+control. General LWT availability remains a documented improvement, not a
+claim made by this revision.
 
-Three-phase charging at the IEC minimum of 6 A needs approximately:
-
-```text
-3 × 230 V × 6 A = 4.14 kW
-```
-
-One-phase charging begins at approximately:
-
-```text
-1 × 230 V × 6 A = 1.38 kW
-```
-
-A relatively small PV system can spend many hours between those values. Before
-this patch, that surplus could not be used without importing power or cycling
-charging off. The kW interface was built so EMHASS can later publish one target
-without needing to understand the GD relay protocol.
-
-## Planned full Auto Discovery migration
-
-The next HA-focused version should:
-
-1. add the writable kW number to ESP Auto Discovery;
-2. remove or mark the raw phase select as diagnostic;
-3. migrate the existing manual number without duplicating entities;
-4. provide a generic EMHASS example with no fixed device ID;
-5. keep high-level hysteresis/solar strategy in HA while the ESP retains the
-   non-bypassable physical switching sequence.
+Reference: [Home Assistant MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery)
+and [MQTT number configuration](https://www.home-assistant.io/integrations/number.mqtt/).

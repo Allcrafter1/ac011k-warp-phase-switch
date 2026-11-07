@@ -19,6 +19,7 @@ enum class MqttDiscoveryType {
 struct DiscoveryTopicInfo {
     const char * const feature;
     const char * const path;
+    const char * const command_path;
     const char * const component;
     const char * const object_id;
     const char * const name_de;

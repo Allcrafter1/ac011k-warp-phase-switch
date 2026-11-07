@@ -142,7 +142,10 @@ bool Mqtt::pushStateUpdate(size_t stateIdx, const String &payload, const String 
 {
     auto &state = this->states[stateIdx];
 
-    if (!deadline_elapsed(state.last_send_ms + mqtt_config_in_use.get("interval")->asUint() * 1000))
+    // A state may remain unchanged for more than half the millis() range.
+    // Deadline ordering is ambiguous then (24.8 days); elapsed duration is not.
+    if (uint32_t(millis() - state.last_send_ms)
+        < uint64_t(mqtt_config_in_use.get("interval")->asUint()) * 1000ULL)
         return false;
 
     this->publish_with_prefix(path, payload);

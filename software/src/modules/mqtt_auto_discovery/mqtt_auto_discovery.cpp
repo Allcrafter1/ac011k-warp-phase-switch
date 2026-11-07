@@ -148,13 +148,24 @@ void MqttAutoDiscovery::prepare_topics()
         mqtt_discovery_topics[i].full_path.concat("/config");
     }
 
-    device_info.reserve(512);
-
-    device_info.concat("\"device\":{\"identifiers\":\"");
-    device_info.concat(client_name);
-    device_info.concat("\",\"manufacturer\":\"Tinkerforge GmbH\",\"model\":\"" BUILD_DISPLAY_NAME "\",\"name\":\"" BUILD_DISPLAY_NAME " (");
-    device_info.concat(client_name);
-    device_info.concat(")\"}");
+    // Serialize device metadata as JSON so configured names are escaped too.
+    DynamicJsonDocument doc(1024);
+    auto device = doc.createNestedObject("device");
+    device["identifiers"] = client_name;
+#ifdef BUILD_NAME_WARPAC011K
+    device["manufacturer"] = "AXITEC";
+    device["model"] = "AC011K (EN+ AC011K-AE-25)";
+    device["name"] = String("AXITEC AC011K (") + client_name + ")";
+#else
+    device["manufacturer"] = "Tinkerforge GmbH";
+    device["model"] = BUILD_DISPLAY_NAME;
+    device["name"] = String(BUILD_DISPLAY_NAME " (") + client_name + ")";
+#endif
+    device["sw_version"] = build_version_full_str();
+    String encoded_device;
+    serializeJson(doc, encoded_device);
+    // The caller inserts this fragment into the discovery object.
+    device_info.concat(encoded_device.substring(1, encoded_device.length() - 1));
 
     device_info.shrinkToFit();
 }
@@ -241,8 +252,13 @@ void MqttAutoDiscovery::announce_next_topic(uint32_t topic_num)
                         payload.concat("\"command_topic\":\"");
                         payload.concat(topic_prefix);
                         payload.concat('/');
-                        payload.concat(mqtt_discovery_topic_infos[topic_num].path);
-                        payload.concat("_update\",");
+                        if (mqtt_discovery_topic_infos[topic_num].command_path[0]) {
+                            payload.concat(mqtt_discovery_topic_infos[topic_num].command_path);
+                        } else {
+                            payload.concat(mqtt_discovery_topic_infos[topic_num].path);
+                            payload.concat("_update");
+                        }
+                        payload.concat("\",");
                         /* FALLTHROUGH */
                     case MqttDiscoveryType::STATE_ONLY:
                         payload.concat("\"state_topic\":\"");
