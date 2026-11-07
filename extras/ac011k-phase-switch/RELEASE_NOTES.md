@@ -7,6 +7,11 @@ checks passed in both directions; vehicle-load tests remain outstanding.
 The broken unused helper and empty legacy MQTT device were removed after approval.
 See [deployment details](DEPLOYMENT_2026-11-07.md).
 
+The tested merged image is published as the `v0.2.0-experimental` GitHub
+prerelease. Use the asset ending in `web-updater-merged.bin`; its SHA-256 is
+`1d6f6c64c7ebda84142b1ae58831a7c2cfe2fa20d0a33d387825b2e783d9c409`.
+The plain application image is intentionally not offered as a web-update asset.
+
 # September candidate history
 
 - Session-slot checks on every low-level start and phase restart/retry.
@@ -15,7 +20,7 @@ See [deployment details](DEPLOYMENT_2026-11-07.md).
 - Discovery power slider, phase currents/voltages and working state diagnostics.
 - English architecture, installation, migration and troubleshooting guides.
 - Host regressions and ESP build passed; physical tests and live migration pending.
-- GD unchanged; no firmware deployment or GitHub push in this review session.
+- GD unchanged; the November release contains no GD firmware replacement.
 
 See [the review](REVIEW_2026-09.md) for evidence and remaining automation work.
 

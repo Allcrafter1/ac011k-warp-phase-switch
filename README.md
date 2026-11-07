@@ -21,9 +21,10 @@ loads and an MG4. Compatibility is specific to the board and GD image below.
 - [How the GD32 relay patch was found](extras/ac011k-phase-switch/REVERSE_ENGINEERING.md)
 - [September ESP32/MQTT review](extras/ac011k-phase-switch/REVIEW_2026-09.md)
 
-The September changes have host regression coverage and an ESP32 build. That
-is separate from physical acceptance of the new firmware; see the test page
-for the remaining checks and the working plan for deployment status.
+The November image is deployed on the project wallbox, the Home Assistant
+migration is complete, and unloaded command-path checks passed. Vehicle-load
+regressions remain open; see the test page for the exact boundary between
+verified behavior and pending physical checks.
 
 ## Project owner's notice
 

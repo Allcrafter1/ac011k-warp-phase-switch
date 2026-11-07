@@ -95,4 +95,6 @@ The raw-image precheck rejected it before flashing; the validated merged upload
 then returned `Update OK`. [INSTALLATION.md](INSTALLATION.md) now documents the
 correct format. The known-working merged image is preserved for rollback.
 
-No GitHub push has been performed in this session.
+The reviewed source and this exact tested merged image were published in the
+`v0.2.0-experimental` GitHub prerelease after the migration cleanup. The release
+does not include or require a new GD image.

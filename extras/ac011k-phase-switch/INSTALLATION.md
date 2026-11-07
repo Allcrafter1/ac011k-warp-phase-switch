@@ -29,6 +29,12 @@ crashes and record the source revision and SHA-256 of each deployed image.
 - For serial recovery, the merged image starts at flash offset `0x1000` and does
   also overwrite boot components. Web OTA and serial flashing are distinct paths.
 
+For the November prerelease, download
+`warpAC011K-2.0.12-6aefa6d4-web-updater-merged.bin` from GitHub Releases and
+verify SHA-256
+`1d6f6c64c7ebda84142b1ae58831a7c2cfe2fa20d0a33d387825b2e783d9c409`
+before upload. This is the exact image deployed on the project wallbox.
+
 ## GD32 build
 
 The September review leaves GD32 unchanged. For an initial installation only:

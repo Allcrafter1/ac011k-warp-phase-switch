@@ -97,6 +97,9 @@ is superseded; practical load/vehicle tests still need the available setup.
   summed three unrelated `*_energy2` sensors. It and the empty old device were
   removed on 2026-11-08 after explicit approval; no stale IDs remain.
 - Full HA backup `9af0f065` includes database. Private evidence in
-  ../backups/2026-11-07-deployment. No GitHub push.
+  ../backups/2026-11-07-deployment.
+- [x] Re-run host regressions and compile the current source before publication.
+- [x] Publish reviewed source and the exact deployed merged image as the
+  `v0.2.0-experimental` GitHub prerelease. Keep vehicle-load tests open.
 
 [Deployment details](extras/ac011k-phase-switch/DEPLOYMENT_2026-11-07.md).
