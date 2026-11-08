@@ -103,3 +103,32 @@ is superseded; practical load/vehicle tests still need the available setup.
   `v0.2.0-experimental` GitHub prerelease. Keep vehicle-load tests open.
 
 [Deployment details](extras/ac011k-phase-switch/DEPLOYMENT_2026-11-07.md).
+
+## Publication and community outreach
+
+GitHub source/release publication is complete, but no earlier plan named an
+external announcement channel. GitHub traffic checked on 8 November showed only
+two unique visitors and one unique clone in the preceding 14 days. Search found
+no indexed announcement of this fork outside GitHub.
+
+Low-effort, high-relevance announcement order:
+
+- [ ] Reply to the established Mikrocontroller.net thread “Reverse engineering
+      Autoaid / EN-Plus AC011K-AE-25 Wallbox mit ESP32”. The original WARP More
+      2.0.12 release was announced there, so this is the strongest continuity.
+- [ ] Reply to the GoingElectric thread “Open Source Firmware für Autoaid /
+      EN-Plus ESP32 TinkerForge Wallboxen”, which already links WARP More and
+      contains AC011K-AE-25/STL users.
+- [ ] Reply to the April 2026 Home Assistant Community question about connecting
+      an AC011K/Evchargo wallbox. Focus on local MQTT, Auto Discovery and the
+      exact tested hardware limitation rather than presenting a generic HACS fix.
+- [ ] Optionally make one broader showcase post in r/homeassistant or
+      r/Elektroautos after the three targeted replies; avoid cross-posting the
+      same sales-style text everywhere.
+- [ ] Correct the GitHub repository homepage URL: it still points at the old
+      v0.1.0 release branch. Point it to the current README or v0.2.0 prerelease.
+
+Possible but lower priority: the AC011K Loxforum thread (different controller),
+the large Sungrow/AC011E Photovoltaikforum thread (adjacent hardware and a high
+risk of compatibility confusion), and an upstream WARP More PR/issue (more work
+than an announcement and the upstream repository has been quiet since 2023).
