@@ -126,3 +126,7 @@ Final loaded acceptance passed 3P -> 1P -> 3P. The independent Shelly measured
 about 10.24 kW on three phases and 2.65 kW on L1 only; the wallbox reported about
 10.18 and 2.61 kW respectively. Verified phase count changed 3 -> 1 -> 3, no
 pending/error remained, and explicit Stop brought both meters to zero.
+
+Source commit `eac56bf` and the exact deployed image were published in the
+`ac011k-phase-switch-v0.2.1-experimental` GitHub prerelease. The repository
+homepage points to that release.

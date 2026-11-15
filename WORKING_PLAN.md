@@ -125,8 +125,8 @@ Low-effort, high-relevance announcement order:
 - [ ] Optionally make one broader showcase post in r/homeassistant or
       r/Elektroautos after the three targeted replies; avoid cross-posting the
       same sales-style text everywhere.
-- [ ] Correct the GitHub repository homepage URL: it still points at the old
-      v0.1.0 release branch. Point it to the current README or v0.2.0 prerelease.
+- [x] Correct the GitHub repository homepage URL; it now points to the current
+      v0.2.1 experimental release instead of an older release.
 
 Possible but lower priority: the AC011K Loxforum thread (different controller),
 the large Sungrow/AC011E Photovoltaikforum thread (adjacent hardware and a high
@@ -172,3 +172,5 @@ than an announcement and the upstream repository has been quiet since 2023).
       a live release, and allow this EV 15 seconds to leave Suspended-by-EV.
 - [x] Build and deploy ESP `2.0.12-6af9b564` (GD unchanged). Merged image SHA-256:
       `8bc96401d14c0eaa45312a21896080f4c27412009c11d03a5fb53a480f9457d1`.
+- [x] Publish commit `eac56bf` to `main` and release the exact deployed image as
+      `ac011k-phase-switch-v0.2.1-experimental` with checksum and test notes.
