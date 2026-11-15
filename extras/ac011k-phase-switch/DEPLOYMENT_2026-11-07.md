@@ -98,3 +98,31 @@ correct format. The known-working merged image is preserved for rollback.
 The reviewed source and this exact tested merged image were published in the
 `v0.2.0-experimental` GitHub prerelease after the migration cleanup. The release
 does not include or require a new GD image.
+
+## 15 November production follow-up
+
+ESP `2.0.12-6af9b564` was deployed after a loaded vehicle test exposed several
+timing interactions that the unloaded acceptance test could not exercise. The
+GD firmware remains 1.2.460 and was not changed. The deployed merged image is
+`warpAC011K_firmware_2_0_12_6af9b564_8430a30e69b97b5_ac011k-mqtt-session-review_merged.bin`
+with SHA-256
+`8bc96401d14c0eaa45312a21896080f4c27412009c11d03a5fb53a480f9457d1`.
+
+Changes verified under load:
+
+- Physical phase validation waits for meaningful current before counting phases;
+  the observed 1.0/0.9/1.0 A startup frame no longer creates a false 2P fault.
+- The redundant GD post-close marker poll was removed. Its command was not
+  reliably answered while charging and could block a later Stop; the patched GD
+  mode is still checked before Start and actual phase currents are the final proof.
+- Explicit Stop always reaches the GD even when the computed limit is already
+  zero. A boot-restored physical charge without a live release is also stopped.
+- Per-attempt vehicle wake time is 15 seconds instead of five. This vehicle was
+  observed taking 5.7--6.5 seconds and was previously reset just before charging.
+- Charge-history recovery refuses invalid/regressing cumulative meter values and
+  retries after GD/meter initialization instead of recording a huge negative use.
+
+Final loaded acceptance passed 3P -> 1P -> 3P. The independent Shelly measured
+about 10.24 kW on three phases and 2.65 kW on L1 only; the wallbox reported about
+10.18 and 2.61 kW respectively. Verified phase count changed 3 -> 1 -> 3, no
+pending/error remained, and explicit Stop brought both meters to zero.

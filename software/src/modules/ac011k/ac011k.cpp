@@ -1218,7 +1218,11 @@ void AC011K::process_phase_switch() {
             set_phase_switch_stage(PHASE_SWITCH_IDLE);
             return;
         }
-        if (deadline_elapsed(phase_switch_stage_since + 5000)) {
+        // This EV can remain in "Suspended by EV" for 5.7--6.5 seconds
+        // after accepting Start.  A five-second timeout repeatedly stopped it
+        // just before it began drawing current.  Keep retries bounded, but
+        // allow the vehicle a realistic wake-up window per attempt.
+        if (deadline_elapsed(phase_switch_stage_since + 15000)) {
             if (restart_attempts >= 3) {
                 set_phase_switch_error(6, "Phase switched, but charging did not resume");
                 return;
@@ -1241,10 +1245,23 @@ void AC011K::validate_physical_phase_count() {
     if (!physical_phase_verification_pending)
         return;
 
-    // GD reports state 3 before its staged relay state machine reaches the
-    // final close block.  Never accept current measurements for one-phase
-    // operation until the patched final hook has proven its execution.
-    if (phase_switch_target == 1 && !gd_close_marker_verified)
+    // Do not classify phases from the EV's low-current startup ramp.  The
+    // three currents do not necessarily cross the 1 A presence threshold in
+    // the same meter report (observed live as 1.0/0.9/1.0 A), which would turn
+    // a healthy three-phase start into a false two-phase mismatch.  Wait until
+    // at least one phase has reached half of the requested current, with a
+    // 2 A floor, then retain the deliberately sensitive 1 A phase-presence
+    // threshold below.  A genuinely missing phase is still rejected as soon
+    // as the remaining phase(s) carry meaningful load.
+    uint16_t validation_current_deciamp = phase_switch_profile_current_ma / 200;
+    if (validation_current_deciamp < 20)
+        validation_current_deciamp = 20;
+    uint16_t maximum_current_deciamp = 0;
+    for (uint8_t i = 0; i < 3; ++i) {
+        if (last_phase_current_deciamp[i] > maximum_current_deciamp)
+            maximum_current_deciamp = last_phase_current_deciamp[i];
+    }
+    if (maximum_current_deciamp < validation_current_deciamp)
         return;
 
     uint8_t observed_phases = 0;
@@ -1567,13 +1584,12 @@ void AC011K::update_evseStatus(uint8_t evseStatus) {
             evse.evse_state.get("contactor_state")->updateUint(3); // TF_EVSE_V2_CONTACTOR_STATE_AC1_LIVE_AC2_LIVE
             for (int i = 0; i < 3; ++i)
                 phases_active[i] = phases_connected[i];
-            if (physical_phase_verification_pending
-                && phase_switch_target == 1
-                && !gd_close_marker_query_sent) {
-                gd_close_marker_query_sent = true;
-                gd_close_marker_query_started_at = millis();
-                gd_close_marker_last_query_at = 0;
-                logger.printfln("GD reports charging; polling staged final phase-hook marker");
+            // A reboot or an error may leave the GD physically charging while
+            // every authorization slot is already closed.  Do not rely on a
+            // 0 -> 0 allowed-current transition to emit the missing Stop.
+            if (charging_current_from_slots() < 6000) {
+                logger.printfln("GD reports charging without a live release; stopping immediately");
+                bs_evse_stop_charging();
             }
             break;
         case 4: // Suspended by charger (started but no power available)

@@ -635,7 +635,10 @@ void EVSEV2::register_urls()
     api.addCommand("evse/stop_charging", Config::Null(), {}, [this](){
         if (evse_state.get("iec61851_state")->asUint() != IEC_STATE_A) {
             evse_slots.get(CHARGING_SLOT_AUTOSTART_BUTTON)->get("max_current")->updateUint(0);
-            /* bs_evse_stop_charging(); // TODO scheduled function to start stop depending on slots?! */
+            // Always forward an explicit Stop.  A phase error may already have
+            // reduced the computed current to zero, so waiting for a slot
+            // transition would otherwise turn a user Stop into a no-op.
+            ac011k.bs_evse_stop_charging();
         }
     }, true);
 

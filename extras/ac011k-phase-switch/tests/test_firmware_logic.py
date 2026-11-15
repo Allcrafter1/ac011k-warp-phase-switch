@@ -23,14 +23,17 @@ class FirmwareLogic(unittest.TestCase):
     def test_real_start_and_mqtt_methods(self):
         ac = 'software/src/modules/ac011k/ac011k.cpp'
         mqtt = 'software/src/modules/mqtt/mqtt.cpp'
+        charge_tracker = 'software/src/modules/charge_tracker/charge_tracker.cpp'
         code = r'''
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
 using std::min;
+using std::isfinite;
 using String = std::string;
 struct Config {
     uint32_t val=0;
@@ -56,7 +59,7 @@ uint32_t millis() {return clock_ms;}
 bool deadline_elapsed(uint32_t d) {return uint32_t(clock_ms-d)<UINT32_MAX/2;}
 struct AC011K {
     bool initialized=true, firmware_update_running=false;
-    int phase_switch_stage=0, sendSequenceNumber=0, starts=0;
+    int phase_switch_stage=0, sendSequenceNumber=0, starts=0, stops=0;
     uint8_t StartChargingA6[1]{}, GetStartPowerMode[1]{};
     Config phase_switch_state, phase_switch_config, power_manager_state;
     bool power_target_control_active=false, power_target_dirty=false, resume_after_phase_switch=false,
@@ -69,13 +72,14 @@ struct AC011K {
       gd_close_marker_last_query_at=0, last_successful_phase_switch=0,
       phase_switch_stage_since=0, last_phase_current_update=0;
     void process_phase_switch();
+    void validate_physical_phase_count();
     bool phase_switch_supported() {return true;}
     void set_phase_switch_stage(int s) {phase_switch_stage=s; phase_switch_stage_since=millis();}
     void set_phase_switch_error(uint8_t,const char*);
     void update_power_manager_target_state() {}
     void apply_power_manager_current(uint16_t n) {evse.evse_slots.get(8)->get("max_current")->updateUint(n);}
     void send_start_power_mode(uint8_t) {}
-    int bs_evse_stop_charging() {return 0;}
+    int bs_evse_stop_charging() {++stops; return 0;}
     uint16_t charging_current_from_slots();
     int bs_evse_start_charging();
     void sendCommand(uint8_t*,size_t,int,bool=true) {++starts;}
@@ -90,13 +94,19 @@ struct Mqtt {
     void publish_with_prefix(const String&,const String&) {++publishes;}
 };
 '''
+        code += method(charge_tracker, 'bool charge_meter_range_valid(')
         code += method(ac, 'uint16_t AC011K::charging_current_from_slots()')
         code += method(ac, 'int AC011K::bs_evse_start_charging()')
         code += method(mqtt, 'bool Mqtt::pushStateUpdate(')
         code += method(ac, 'void AC011K::process_phase_switch()')
         code += method(ac, 'void AC011K::set_phase_switch_error(')
+        code += method(ac, 'void AC011K::validate_physical_phase_count()')
         code += r'''
 int main() {
+    assert(charge_meter_range_valid(4290.5F, 4335.117F));
+    assert(!charge_meter_range_valid(4290.5F, 0.0F));
+    assert(!charge_meter_range_valid(4290.5F, NAN));
+    assert(charge_meter_range_valid(NAN, 4335.117F));
     AC011K box;
     evse.evse_state.get("iec61851_state")->val=1;
     evse.evse_state.get("GD_state")->val=2;
@@ -165,6 +175,21 @@ int main() {
     box.phase_switch_stage=PHASE_SWITCH_RESTART_PAUSE;
     box.process_phase_switch();
     assert(box.starts==3 && box.phase_switch_stage==PHASE_SWITCH_IDLE);
+    // The observed EV needs more than five seconds to leave Suspended-by-EV.
+    // Do not reset its startup before the bounded 15-second window expires.
+    box.power_target_dirty=false;
+    box.phase_switch_stage=PHASE_SWITCH_RESTARTING;
+    box.phase_switch_stage_since=0;
+    evse.evse_state.get("charger_state")->val=2;
+    clock_ms=10000;
+    int stops_before_wakeup=box.stops;
+    box.process_phase_switch();
+    assert(box.phase_switch_stage==PHASE_SWITCH_RESTARTING);
+    assert(box.stops==stops_before_wakeup);
+    clock_ms=15001;
+    box.process_phase_switch();
+    assert(box.phase_switch_stage==PHASE_SWITCH_RESTART_PAUSE);
+    assert(box.stops==stops_before_wakeup+1);
     // Stale zero samples must never authorize a relay-mode command.
     box.phase_switch_stage=PHASE_SWITCH_OFF_DELAY;
     box.phase_switch_stage_since=0;
@@ -178,6 +203,49 @@ int main() {
     assert(box.phase_switch_stage==PHASE_SWITCH_ERROR);
     assert(evse.evse_slots.get(8)->get("max_current")->val==0);
     assert(box.power_manager_state.get("pending")->asBool());
+    // A slow EV startup produced 1.0/0.9/1.0 A in production.  It must not be
+    // classified as a two-phase fault before meaningful load is present.
+    box.phase_switch_stage=PHASE_SWITCH_IDLE;
+    box.physical_phase_verification_pending=true;
+    box.phase_switch_target=3;
+    box.phase_switch_profile_current_ma=16000;
+    box.last_phase_current_deciamp[0]=10;
+    box.last_phase_current_deciamp[1]=9;
+    box.last_phase_current_deciamp[2]=10;
+    int stops_before_validation=box.stops;
+    box.validate_physical_phase_count();
+    assert(box.physical_phase_verification_pending);
+    assert(box.phase_switch_stage==PHASE_SWITCH_IDLE);
+    assert(box.stops==stops_before_validation);
+    // Once load has ramped up, all three phases are accepted.
+    box.last_phase_current_deciamp[0]=80;
+    box.last_phase_current_deciamp[1]=79;
+    box.last_phase_current_deciamp[2]=80;
+    box.validate_physical_phase_count();
+    assert(!box.physical_phase_verification_pending);
+    assert(box.phase_switch_state.get("physically_verified")->asBool());
+    // Physical current is the final proof for one-phase mode.  Post-close GD
+    // marker queries are intentionally not required because the GD may not
+    // answer them while charging and can starve a subsequent Stop command.
+    box.physical_phase_verification_pending=true;
+    box.phase_switch_target=1;
+    box.phase_switch_profile_current_ma=12000;
+    box.gd_close_marker_verified=false;
+    box.last_phase_current_deciamp[0]=110;
+    box.last_phase_current_deciamp[1]=0;
+    box.last_phase_current_deciamp[2]=0;
+    box.validate_physical_phase_count();
+    assert(!box.physical_phase_verification_pending);
+    assert(box.phase_switch_state.get("physically_verified")->asBool());
+    // A truly missing phase is still rejected at meaningful load.
+    box.physical_phase_verification_pending=true;
+    box.last_phase_current_deciamp[0]=80;
+    box.last_phase_current_deciamp[1]=75;
+    box.last_phase_current_deciamp[2]=9;
+    box.validate_physical_phase_count();
+    assert(!box.physical_phase_verification_pending);
+    assert(box.phase_switch_stage==PHASE_SWITCH_ERROR);
+    assert(box.stops>stops_before_validation);
     Mqtt mqtt;
     mqtt.mqtt_config_in_use.get("interval")->val=1;
     clock_ms=999;

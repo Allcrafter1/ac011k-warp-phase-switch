@@ -47,6 +47,14 @@ static_assert(sizeof(ChargeEnd) == 7, "Unexpected size of ChargeEnd");
 
 static_assert(CHARGE_RECORD_SIZE == 16, "Unexpected size of ChargeStart + ChargeEnd");
 
+bool charge_meter_range_valid(float meter_start, float meter_end)
+{
+    // A charge may have started before a meter was available, which is already
+    // represented by NaN in the existing record format.  The end value itself
+    // must always be usable, and a cumulative meter must never run backwards.
+    return isfinite(meter_end) && (!isfinite(meter_start) || meter_end >= meter_start);
+}
+
 #define CHARGE_RECORD_FOLDER "/charge-records"
 // 30 files with 256 records each: 7680 records @ ~ max. 10 records per day = ~ 2 years and one month of records.
 #define CHARGE_RECORD_FILE_COUNT 30
@@ -142,6 +150,21 @@ void ChargeTracker::endCharge(uint32_t charge_duration_seconds, float meter_end)
             // TODO: How to handle this case? Add a charge start with the same meter value as the last end?
             // This would also mean that all the size checks of startCharge have to be duplicated!
             // If we check in ::setup() whether a charge is running, this can never happen.
+            return;
+        }
+
+        ChargeStart cs;
+        {
+            File read_file = LittleFS.open(chargeRecordFilename(this->last_charge_record));
+            if (!read_file.seek(-static_cast<int32_t>(sizeof(ChargeStart)), SeekMode::SeekEnd)
+                || read_file.read(reinterpret_cast<uint8_t *>(&cs), sizeof(cs)) != sizeof(cs)) {
+                logger.printfln("Can't track end of charge: Failed to read the open charge start");
+                return;
+            }
+        }
+        if (!charge_meter_range_valid(cs.meter_start, meter_end)) {
+            logger.printfln("Deferring end of charge: Invalid meter range %.3f -> %.3f",
+                static_cast<double>(cs.meter_start), static_cast<double>(meter_end));
             return;
         }
 

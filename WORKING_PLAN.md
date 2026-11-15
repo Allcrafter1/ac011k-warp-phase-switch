@@ -132,3 +132,43 @@ Possible but lower priority: the AC011K Loxforum thread (different controller),
 the large Sungrow/AC011E Photovoltaikforum thread (adjacent hardware and a high
 risk of compatibility confusion), and an upstream WARP More PR/issue (more work
 than an announcement and the upstream repository has been quiet since 2023).
+
+## 2026-11-15: production stability and meter comparison
+
+- [x] Review eight days of HA history and the ESP event log. The ESP ran from
+      7 to 15 November without an unplanned reset. One roughly 79-second Wi-Fi
+      outage on 13 November recovered without intervention; MQTT reconnected.
+      No GD, phase-switch or charging faults were recorded.
+- [x] Compare the two completed three-phase charging sessions against the Shelly
+      3EM. The wallbox total was 40.885 versus 41.670 kWh (-1.88%) and 44.617
+      versus 45.199 kWh (-1.29%). Stable-load power was about 1.5--2.2% below
+      the Shelly, consistently and without phase dropouts.
+- [x] Replace the personal MQTT login stored in the wallbox with the dedicated
+      broker account, verify its credentials before applying them, reboot once
+      to activate the setting and confirm MQTT reconnect. Do not record secrets.
+- [x] Verify that the controlled reboot closed the still-plugged session release:
+      allowed current changed to zero and no charging restart occurred.
+- [x] Replace all four Shelly Energy Dashboard entries with one calibrated
+      `total_increasing` Auto total. It preserves the former 4845.9588 kWh value
+      and adds 1.5% only to future wallbox deltas; the raw wallbox total remains
+      unchanged. Update the Lovelace card and remove the three utility meters,
+      invalid sum helper and broken charge-cost template.
+- [x] Reset all three persistent Shelly 3EM counters, purge their old recorder
+      history, and rename the device/phase devices for their heat-pump role.
+      Backup `ea5309a8` contains HA configuration and database before this work.
+- [x] Execute a loaded 3P -> 1P -> 3P acceptance test. Final results: 3P about
+      10.18 kW internally / 10.24 kW Shelly with 14.6--14.9 A on every phase;
+      1P 2.61 / 2.65 kW with 11.3--11.4 A only on L1. Physical phase proof was
+      3 -> 1 -> 3, pending cleared and the explicit Stop reached zero power.
+- [x] Fix charge-tracker reboot recovery: `Users::setup()` could close an open
+      record before the GD/meter state is initialized. The 15 November controlled
+      reboot produced a checksum mismatch and an invalid -4290.5 kWh internal
+      charge-history entry. Recovery now retries after meter initialization and
+      rejects non-finite or regressing meter-end values. The already-corrupted
+      historical row is not rewritten; live and cumulative values were unaffected.
+- [x] Fix three live-test findings: defer phase classification until meaningful
+      load, remove the unreliable post-close GD marker poll that could starve Stop,
+      always forward explicit Stop to the GD, stop boot-restored charging without
+      a live release, and allow this EV 15 seconds to leave Suspended-by-EV.
+- [x] Build and deploy ESP `2.0.12-6af9b564` (GD unchanged). Merged image SHA-256:
+      `8bc96401d14c0eaa45312a21896080f4c27412009c11d03a5fb53a480f9457d1`.

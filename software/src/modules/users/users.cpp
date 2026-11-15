@@ -382,6 +382,22 @@ void Users::setup()
         this->stop_charging(0, true);
     }
 
+    // AC011K does not retain UserSlotInfo across an ESP reboot and its meter
+    // becomes valid asynchronously after Users::setup().  If the immediate
+    // recovery above had to defer closing an open record, retry after the GD
+    // and meter are initialized.  This also keeps an EV-suspended but otherwise
+    // active session open (charger states 2/3), matching the normal logic.
+    task_scheduler.scheduleWithFixedDelay([this](){
+        if (!charge_tracker.currentlyCharging())
+            return;
+
+        const uint8_t charger_state = get_charger_state();
+        if (charger_state == 2 || charger_state == 3)
+            return;
+
+        this->stop_charging(0, true);
+    }, 1000, 1000);
+
     if (charging) {
         // If the EVSE is already charging, read back the user slot info, in case the ESP just power cycled.
         UserSlotInfo info;
